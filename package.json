@@ -37,6 +37,7 @@
     "files": [
       "main.js",
       "preload.js",
+      "logger.js",
       "renderer/**/*",
       "package.json"
     ],
