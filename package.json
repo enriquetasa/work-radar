@@ -7,6 +7,14 @@
   "main": "main.js",
   "scripts": {
     "start": "electron .",
+    "icon": "node scripts/make-icon.js",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "test": "node --test",
+    "check": "npm run lint && npm run format:check && npm test",
+    "prebuild": "npm run icon",
     "build": "electron-builder",
     "build:mac": "electron-builder --mac",
     "build:win": "electron-builder --win",
@@ -14,7 +22,11 @@
   },
   "devDependencies": {
     "electron": "^42.4.0",
-    "electron-builder": "^26.15.3"
+    "electron-builder": "^26.15.3",
+    "eslint": "^9.39.4",
+    "eslint-config-prettier": "^10.1.8",
+    "globals": "^17.6.0",
+    "prettier": "^3.8.4"
   },
   "build": {
     "appId": "com.tasa.workradar",
