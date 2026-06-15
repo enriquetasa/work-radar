@@ -2,3 +2,6 @@ node_modules/
 dist/
 *.log
 .DS_Store
+
+# Transient icon build dir (icon.png / icon.icns are committed; this is temp).
+build/icon.iconset/

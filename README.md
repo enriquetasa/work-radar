@@ -23,6 +23,7 @@ npm run build:linux   # → dist/Work Radar-2.0.0.AppImage
 Install the artifact from `dist/` like any other app. On macOS the build is unsigned, so the first launch needs right-click → Open (or `System Settings → Privacy & Security → Open Anyway`). Signing requires an Apple Developer ID — add it to the `build.mac` block in `package.json` if you want notarization.
 
 ### Launch on login
+
 - **macOS:** System Settings → General → Login Items → add Work Radar.
 - **Windows:** the NSIS installer offers a Start-menu/desktop shortcut; drop it in `shell:startup` to auto-launch.
 
@@ -49,18 +50,40 @@ In-window: `N` `/` `E` (edit) `P` (ping) `A` (archive) `Esc`
 
 ## Staleness model
 
-Anything you haven't **PINGED** in 14 days flags `NEEDS REVIEW` — amber halo on the radar, a count in the header, a dedicated REVIEW filter. PING resets the clock. Change the window in `renderer/app.js`: `const STALE_DAYS = 14;`
+Anything you haven't **PINGED** in 14 days flags `NEEDS REVIEW` — amber halo on the radar, a count in the header, a dedicated REVIEW filter. PING resets the clock. Change the window in `renderer/domain.js`: `const STALE_DAYS = 14;`
+
+## Development
+
+```bash
+npm test           # unit tests (node:test) for the pure domain logic
+npm run lint       # eslint
+npm run format     # prettier --write   (format:check to verify only)
+npm run check      # lint + format:check + test — the pre-merge gate
+npm run icon       # regenerate build/icon.* from scripts/make-icon.js
+```
+
+`npm run build` runs the icon generator first (`prebuild`).
 
 ## Architecture
 
 ```
 main.js          Main process — owns ALL disk IO, window, menu, daily backups.
+logger.js        Structured JSON logger for the main process (one line per event).
 preload.js       contextBridge: exposes a tiny window.radarAPI (load/save/export/import).
 renderer/        UI. No Node access; talks to disk only through radarAPI over IPC.
   index.html     Markup + strict CSP (script-src 'self').
   app.css        Styles.
+  domain.js      Pure, DOM-free logic (migrate, staleness, filter/sort, merge).
+                 Loaded as a browser global AND require()-able under node:test.
   app.js         State store, render, actions. Falls back to localStorage if run
                  outside Electron, so the same code works in a plain browser too.
+scripts/
+  make-icon.js   Renders the radar dock icon to build/icon.* (zero deps).
+test/
+  domain.test.js Unit tests for domain.js.
 ```
 
 Security defaults: `contextIsolation: true`, `nodeIntegration: false`, `sandbox: true`, CSP locked to self. The renderer never sees Node or the filesystem directly.
+
+The split between `domain.js` (pure) and `app.js` (DOM/IO) is what makes the
+core logic unit-testable without spinning up Electron or a headless browser.
