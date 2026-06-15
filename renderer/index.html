@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta http-equiv="Content-Security-Policy"
+      content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:;">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Work Radar</title>
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<div id="app">
+  <div id="header">
+    <div id="header-left">
+      <span id="header-title"><span class="blink">◈</span> WORK RADAR</span>
+      <span id="header-sub">SITUATIONAL AWARENESS</span>
+    </div>
+    <div id="stats">
+      <span id="backup-warn">⚠ BACKUP DUE</span>
+      <span class="stat">CRIT <strong id="s-crit" class="c-crit">0</strong></span>
+      <span class="stat">HIGH <strong id="s-high" class="c-high">0</strong></span>
+      <span class="stat">REVIEW <strong id="s-review" class="c-high">0</strong></span>
+      <span class="stat">LIVE <strong id="s-live" class="c-green">0</strong></span>
+      <span class="stat">ARCH <strong id="s-arch" class="c-dorm">0</strong></span>
+      <span id="clock"></span>
+    </div>
+  </div>
+
+  <div id="toolbar">
+    <div id="tabs">
+      <button class="tab active" data-view="live">◉ LIVE</button>
+      <button class="tab" data-view="archive">⊙ ARCHIVE</button>
+    </div>
+    <div id="search-wrap"><input id="search" placeholder="SEARCH CONTACTS  ( / )" autocomplete="off"></div>
+    <div id="filters">
+      <button class="filter-btn active" data-filter="all">ALL</button>
+      <button class="filter-btn" data-filter="active">ACTIVE</button>
+      <button class="filter-btn" data-filter="watch">WATCH</button>
+      <button class="filter-btn" data-filter="dormant">DORMANT</button>
+      <button class="filter-btn" data-filter="review">REVIEW</button>
+    </div>
+    <select id="sort" title="Sort order">
+      <option value="priority">SORT: PRIORITY</option>
+      <option value="stale">SORT: STALENESS</option>
+      <option value="name">SORT: NAME</option>
+      <option value="recent">SORT: RECENT</option>
+    </select>
+    <button class="tool-btn" id="export-btn" title="Save a JSON backup">↓ EXPORT</button>
+    <button class="tool-btn" id="import-btn" title="Merge a JSON backup">↑ IMPORT</button>
+    <input type="file" id="import-file" accept="application/json,.json">
+  </div>
+
+  <div id="body">
+    <div id="radar-panel">
+      <div id="radar-label">SPATIAL DISPLAY</div>
+      <svg id="radar-svg" viewBox="0 0 256 256">
+        <rect width="256" height="256" fill="#010805"/>
+        <line x1="128" y1="15" x2="128" y2="241" stroke="#0c1f0e" stroke-width="1"/>
+        <line x1="15" y1="128" x2="241" y2="128" stroke="#0c1f0e" stroke-width="1"/>
+        <line x1="51" y1="51" x2="205" y2="205" stroke="#091a0b" stroke-width="1"/>
+        <line x1="205" y1="51" x2="51" y2="205" stroke="#091a0b" stroke-width="1"/>
+        <circle cx="128" cy="128" r="110" fill="none" stroke="#1a3d22" stroke-width="1"/>
+        <circle cx="128" cy="128" r="67" fill="none" stroke="#0c1f0e" stroke-width="1" stroke-dasharray="3 5"/>
+        <circle cx="128" cy="128" r="34" fill="none" stroke="#0c1f0e" stroke-width="1" stroke-dasharray="3 5"/>
+        <g id="ticks"></g>
+        <text x="128" y="10" fill="#1a3d22" font-size="7" text-anchor="middle" dominant-baseline="middle">N</text>
+        <text x="246" y="128" fill="#1a3d22" font-size="7" text-anchor="middle" dominant-baseline="middle">E</text>
+        <text x="128" y="246" fill="#1a3d22" font-size="7" text-anchor="middle" dominant-baseline="middle">S</text>
+        <text x="10" y="128" fill="#1a3d22" font-size="7" text-anchor="middle" dominant-baseline="middle">W</text>
+        <text x="165" y="126" fill="#0c1f0e" font-size="6" text-anchor="start">ACT</text>
+        <text x="198" y="126" fill="#0c1f0e" font-size="6" text-anchor="start">WCH</text>
+        <text x="226" y="126" fill="#0c1f0e" font-size="6" text-anchor="start">DRM</text>
+        <line id="sweep-line" x1="128" y1="128" x2="128" y2="18" stroke="#00e676" stroke-width="1.5" stroke-opacity="0.55"/>
+        <g id="blips"></g>
+        <circle cx="128" cy="128" r="2.5" fill="#00e676" fill-opacity="0.7"/>
+      </svg>
+      <div id="radar-legend">
+        <div id="legend-priority">
+          <div class="lp"><div class="lp-dot" style="background:#f44336"></div>CRIT</div>
+          <div class="lp"><div class="lp-dot" style="background:#ff9100"></div>HIGH</div>
+          <div class="lp"><div class="lp-dot" style="background:#00e676"></div>MEDI</div>
+          <div class="lp"><div class="lp-dot" style="background:#26c6da"></div>LOW</div>
+        </div>
+        <div id="legend-rings">
+          <div>◈ inner ring → ACTIVE</div>
+          <div>◈ mid ring → WATCH</div>
+          <div>◈ outer ring → DORMANT</div>
+          <div class="c-high">◈ amber halo → NEEDS REVIEW</div>
+        </div>
+      </div>
+    </div>
+
+    <div id="right-panel">
+      <div id="detail-panel">
+        <div id="detail-header">
+          <div>
+            <div id="detail-name"></div>
+            <div id="detail-meta"></div>
+          </div>
+          <div id="detail-actions"></div>
+        </div>
+        <div id="detail-notes"></div>
+        <div id="detail-date"></div>
+      </div>
+
+      <div id="form-panel">
+        <div id="form-label">◈ NEW CONTACT ACQUISITION</div>
+        <div id="form-fields">
+          <input id="f-name" placeholder="CALLSIGN / DESIGNATION *" autocomplete="off">
+          <input id="f-cat" placeholder="SECTOR / CATEGORY  (e.g. OEES · LUMEN · PERSONAL)" autocomplete="off">
+          <div class="form-row">
+            <span class="form-row-label">STATUS</span>
+            <button class="seg-btn" data-group="status" data-val="active">ACTIVE</button>
+            <button class="seg-btn" data-group="status" data-val="watch">WATCH</button>
+            <button class="seg-btn" data-group="status" data-val="dormant">DORMANT</button>
+          </div>
+          <div class="form-row">
+            <span class="form-row-label">THREAT</span>
+            <button class="seg-btn" data-group="priority" data-val="critical">CRITICAL</button>
+            <button class="seg-btn" data-group="priority" data-val="high">HIGH</button>
+            <button class="seg-btn" data-group="priority" data-val="medium">MEDIUM</button>
+            <button class="seg-btn" data-group="priority" data-val="low">LOW</button>
+          </div>
+          <textarea id="f-notes" placeholder="INTEL / NOTES (optional)" rows="2"></textarea>
+        </div>
+        <div id="form-actions">
+          <button class="form-act" id="form-abort">ABORT  (ESC)</button>
+          <button class="form-act primary" id="form-save">ACQUIRE  (↵)</button>
+        </div>
+      </div>
+
+      <div id="list"><div id="empty-msg">— NO CONTACTS ON SCOPE —</div></div>
+
+      <div id="footer">
+        <button id="add-btn">+ ACQUIRE NEW CONTACT</button>
+        <span id="kbd-hint"><b>N</b> new · <b>/</b> search · <b>E</b> edit · <b>P</b> ping · <b>A</b> archive · <b>ESC</b> close</span>
+      </div>
+    </div>
+  </div>
+</div>
+<script src="app.js"></script>
+</body>
+</html>
