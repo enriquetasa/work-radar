@@ -369,6 +369,43 @@ select {
   color: #152e1a;
   letter-spacing: 1px;
 }
+#detail-log {
+  margin-top: 8px;
+  max-height: 108px;
+  overflow-y: auto;
+}
+.detail-log-header {
+  font-size: 7px;
+  letter-spacing: 2px;
+  color: #1a4d2e;
+  margin-bottom: 4px;
+}
+.detail-log-entry {
+  display: flex;
+  gap: 10px;
+  font-size: 8px;
+  line-height: 1.7;
+  user-select: text;
+}
+.detail-log-ts {
+  color: #1a4d2e;
+  flex-shrink: 0;
+  letter-spacing: 0.5px;
+}
+.detail-log-text {
+  color: #2e7d4a;
+  word-break: break-word;
+}
+#detail-log-compose {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  margin-top: 8px;
+}
+.detail-log-input {
+  flex: 1;
+  width: auto;
+}
 
 #form-panel {
   background: #010d05;

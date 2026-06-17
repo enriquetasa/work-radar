@@ -98,7 +98,7 @@ function commit() {
 const Actions = {
   add(v) {
     const now = Date.now();
-    Store.items.push({ id: uid(), ...v, addedAt: now, updatedAt: now, reviewedAt: now });
+    Store.items.push({ id: uid(), ...v, log: [], addedAt: now, updatedAt: now, reviewedAt: now });
     commit();
   },
   update(id, v) {
@@ -129,6 +129,13 @@ const Actions = {
   purge(id) {
     Store.arch = Store.arch.filter((i) => i.id !== id);
     if (Store.ui.sel === id) Store.ui.sel = null;
+    commit();
+  },
+  addLogEntry(id, text) {
+    const entry = { ts: Date.now(), text };
+    Store.items = Store.items.map((i) =>
+      i.id === id ? { ...i, log: [...(i.log || []), entry] } : i
+    );
     commit();
   },
 
@@ -342,6 +349,52 @@ function renderDetail() {
     render();
   };
   da.appendChild(cb);
+
+  // Log entries (newest first)
+  const logEl = document.getElementById('detail-log');
+  logEl.innerHTML = '';
+  const entries = (it.log || []).slice().reverse();
+  if (entries.length) {
+    const hdr = document.createElement('div');
+    hdr.className = 'detail-log-header';
+    hdr.textContent = '◈ LOG  (' + entries.length + ')';
+    logEl.appendChild(hdr);
+    entries.forEach((entry) => {
+      const row = document.createElement('div');
+      row.className = 'detail-log-entry';
+      const ts = document.createElement('span');
+      ts.className = 'detail-log-ts';
+      ts.textContent = fdt(entry.ts);
+      const txt = document.createElement('span');
+      txt.className = 'detail-log-text';
+      txt.textContent = entry.text;
+      row.append(ts, txt);
+      logEl.appendChild(row);
+    });
+  }
+
+  // Compose (live items only)
+  const composeEl = document.getElementById('detail-log-compose');
+  composeEl.innerHTML = '';
+  if (!it.archivedAt) {
+    const input = document.createElement('input');
+    input.className = 'detail-log-input';
+    input.placeholder = 'STATUS UPDATE…';
+    input.autocomplete = 'off';
+    const btn = document.createElement('button');
+    btn.className = 'dact';
+    btn.textContent = 'STATUS UPDATE';
+    const submit = () => {
+      const text = input.value.trim();
+      if (!text) return;
+      Actions.addLogEntry(it.id, text);
+    };
+    btn.onclick = submit;
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') submit();
+    });
+    composeEl.append(input, btn);
+  }
 }
 
 function renderList() {

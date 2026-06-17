@@ -57,6 +57,7 @@
         updatedAt: x.updatedAt || x.addedAt || now,
         reviewedAt: x.reviewedAt || x.addedAt || now,
         archivedAt: x.archivedAt || undefined,
+        log: Array.isArray(x.log) ? x.log : [],
       }));
   }
 

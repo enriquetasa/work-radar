@@ -160,3 +160,19 @@ test('uid produces distinct values', () => {
   const ids = new Set(Array.from({ length: 100 }, () => D.uid()));
   assert.equal(ids.size, 100);
 });
+
+test('migrate initialises log: [] for items without a log', () => {
+  const out = D.migrate([{ name: 'Alpha' }], NOW);
+  assert.deepEqual(out[0].log, []);
+});
+
+test('migrate preserves existing log entries', () => {
+  const log = [{ ts: NOW - 1000, text: 'first entry' }];
+  const out = D.migrate([{ name: 'Beta', log }], NOW);
+  assert.deepEqual(out[0].log, log);
+});
+
+test('migrate drops non-array log field', () => {
+  const out = D.migrate([{ name: 'Gamma', log: 'bad' }], NOW);
+  assert.deepEqual(out[0].log, []);
+});
