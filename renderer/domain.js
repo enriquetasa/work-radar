@@ -116,15 +116,8 @@
       .sort((a, b) => PRANK[a.priority] - PRANK[b.priority] || a.name.localeCompare(b.name));
 
     const PRIORITY_LABEL = { critical: 'CRITICAL', high: 'HIGH', medium: 'MEDIUM', low: 'LOW' };
-    const PRIORITY_COLOR = {
-      critical: '#b71c1c',
-      high: '#e65100',
-      medium: '#1b5e20',
-      low: '#006064',
-    };
     const STATUS_LABEL = { active: 'ACTIVE', watch: 'WATCH', dormant: 'DORMANT' };
 
-    // Group items by priority so the report has clear sections.
     const groups = ['critical', 'high', 'medium', 'low']
       .map((p) => ({ priority: p, items: live.filter((i) => i.priority === p) }))
       .filter((g) => g.items.length > 0);
@@ -133,70 +126,52 @@
       .map((g) => {
         const itemsHTML = g.items
           .map((item) => {
-            const meta = [STATUS_LABEL[item.status], item.category].filter(Boolean).join(' · ');
+            const meta = [STATUS_LABEL[item.status], item.category].filter(Boolean).join('  /  ');
             const notesHTML = item.notes
               ? `<div class="item-notes">${escapeHtml(item.notes)}</div>`
               : '';
             const logHTML =
               item.log && item.log.length
-                ? `<div class="log">
-                    <div class="log-label">LOG</div>
-                    ${item.log
-                      .map(
-                        (e) =>
-                          `<div class="log-entry"><span class="log-ts">${fdt(e.ts)}</span><span>${escapeHtml(e.text)}</span></div>`
-                      )
-                      .join('')}
-                  </div>`
+                ? `<div class="log">${item.log.map((e) => `<div class="log-entry"><span class="log-ts">${fdt(e.ts)}</span>${escapeHtml(e.text)}</div>`).join('')}</div>`
                 : '';
-            return `<div class="item">
-              <div class="item-name">${escapeHtml(item.name.toUpperCase())}</div>
-              <div class="item-meta">${escapeHtml(meta)}</div>
-              ${notesHTML}${logHTML}
-            </div>`;
+            return `<div class="item"><div class="item-name">${escapeHtml(item.name.toUpperCase())}</div><div class="item-meta">${escapeHtml(meta)}</div>${notesHTML}${logHTML}</div>`;
           })
           .join('');
-        return `<div class="group">
-          <div class="group-label" style="color:${PRIORITY_COLOR[g.priority]}">
-            ● ${PRIORITY_LABEL[g.priority]}
-          </div>
-          ${itemsHTML}
-        </div>`;
+        return `<div class="group"><div class="group-label">${PRIORITY_LABEL[g.priority]}</div>${itemsHTML}</div>`;
       })
       .join('');
+
+    const css = `
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:'Courier New',Courier,monospace;color:#111;max-width:680px;margin:0 auto;padding:28px 32px;font-size:11px;line-height:1.5}
+.report-title{font-size:13px;font-weight:bold;letter-spacing:1px;text-transform:uppercase}
+.report-sub{font-size:10px;color:#666;margin-top:2px}
+.report-rule{border:none;border-top:1px solid #111;margin:10px 0 16px}
+.group{margin-bottom:14px}
+.group-label{font-size:9px;font-weight:bold;letter-spacing:3px;color:#888;border-bottom:1px solid #ddd;padding-bottom:3px;margin-bottom:8px}
+.item{margin-bottom:8px;padding-bottom:8px;border-bottom:1px solid #efefef;page-break-inside:avoid}
+.item:last-child{border-bottom:none;margin-bottom:0;padding-bottom:0}
+.item-name{font-weight:bold;font-size:12px;letter-spacing:.5px}
+.item-meta{font-size:10px;color:#666;margin:2px 0 4px}
+.item-notes{font-size:10px;color:#333;padding-left:12px;white-space:pre-wrap;word-break:break-word;margin-bottom:4px}
+.log{padding-left:12px}
+.log-entry{font-size:10px;color:#555;padding:1px 0;word-break:break-word}
+.log-ts{display:inline-block;width:76px;color:#999;flex-shrink:0}
+.footer{margin-top:16px;border-top:1px solid #ddd;padding-top:6px;font-size:9px;color:#bbb;letter-spacing:.5px}`;
 
     return `<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
 <title>Work Radar Report — ${date}</title>
-<style>
-  body{font-family:-apple-system,BlinkMacSystemFont,'Helvetica Neue',Arial,sans-serif;
-    color:#1a1a1a;max-width:680px;margin:0 auto;padding:40px 32px;font-size:11px;line-height:1.6}
-  h1{font-size:20px;font-weight:700;letter-spacing:3px;text-transform:uppercase;margin:0 0 4px}
-  .subtitle{font-size:9px;letter-spacing:1px;color:#888;text-transform:uppercase;margin-bottom:36px}
-  .group{margin-bottom:28px}
-  .group-label{font-size:9px;font-weight:700;letter-spacing:3px;text-transform:uppercase;
-    margin-bottom:10px;padding-bottom:6px;border-bottom:2px solid currentColor}
-  .item{padding:12px 0;border-bottom:1px solid #eee;page-break-inside:avoid}
-  .item-name{font-size:13px;font-weight:600;letter-spacing:1px;text-transform:uppercase;margin-bottom:2px}
-  .item-meta{font-size:9px;letter-spacing:1px;color:#666;text-transform:uppercase;margin-bottom:6px}
-  .item-notes{font-size:10px;color:#333;border-left:2px solid #ddd;padding-left:10px;
-    margin-bottom:8px;white-space:pre-wrap;word-break:break-word}
-  .log{margin-top:6px}
-  .log-label{font-size:8px;letter-spacing:2px;color:#aaa;text-transform:uppercase;margin-bottom:4px}
-  .log-entry{display:flex;gap:14px;font-size:9px;color:#444;padding:3px 0;
-    border-bottom:1px solid #f5f5f5;word-break:break-word}
-  .log-ts{color:#aaa;flex-shrink:0;font-variant-numeric:tabular-nums}
-  .footer{margin-top:40px;padding-top:12px;border-top:1px solid #eee;
-    font-size:8px;color:#bbb;letter-spacing:1px;text-transform:uppercase}
-</style>
+<style>${css}</style>
 </head>
 <body>
-  <h1>Work Radar</h1>
-  <div class="subtitle">Status Report — ${date} — ${live.length} active contact${live.length !== 1 ? 's' : ''}</div>
-  ${groupsHTML}
-  <div class="footer">Generated ${date} · Work Radar v2</div>
+<div class="report-title">Work Radar — Status Report</div>
+<div class="report-sub">${date}  ·  ${live.length} active contact${live.length !== 1 ? 's' : ''}</div>
+<hr class="report-rule">
+${groupsHTML}
+<div class="footer">Generated ${date}  ·  Work Radar v2</div>
 </body>
 </html>`;
   }
