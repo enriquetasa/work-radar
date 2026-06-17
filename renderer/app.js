@@ -159,6 +159,22 @@ const Actions = {
     }
   },
 
+  async exportPDF() {
+    const html = D.buildReportHTML(Store.items);
+    if (HAS_API) {
+      const res = await window.radarAPI.exportPDF(html);
+      if (!res || !res.ok) {
+        console.error('PDF export failed', res && res.error);
+        if (res && res.error) alert('PDF EXPORT FAILED — ' + res.error);
+      }
+    } else {
+      // Browser fallback: open in a new tab and let the user print to PDF.
+      const w = window.open();
+      w.document.write(html);
+      w.document.close();
+    }
+  },
+
   mergeImported(d) {
     const inItems = D.migrate(Array.isArray(d.items) ? d.items : []);
     const inArch = D.migrate(Array.isArray(d.arch) ? d.arch : []);
@@ -589,7 +605,8 @@ function wire() {
   document.getElementById('f-name').addEventListener('keydown', (e) => {
     if (e.key === 'Enter') saveForm();
   });
-  document.getElementById('export-btn').addEventListener('click', () => Actions.exportJSON());
+  document.getElementById('export-json-btn').addEventListener('click', () => Actions.exportJSON());
+  document.getElementById('export-pdf-btn').addEventListener('click', () => Actions.exportPDF());
   document.getElementById('import-btn').addEventListener('click', () => Actions.importJSON());
   document.getElementById('import-file').addEventListener('change', (e) => {
     const f = e.target.files[0];
@@ -641,6 +658,7 @@ function wire() {
       if (action === 'new') openAdd();
       else if (action === 'search') document.getElementById('search').focus();
       else if (action === 'export') Actions.exportJSON();
+      else if (action === 'exportPDF') Actions.exportPDF();
       else if (action === 'import') Actions.importJSON();
       else if (action === 'reveal' && window.radarAPI.revealBackups)
         window.radarAPI.revealBackups();

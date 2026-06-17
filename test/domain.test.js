@@ -176,3 +176,53 @@ test('migrate drops non-array log field', () => {
   const out = D.migrate([{ name: 'Gamma', log: 'bad' }], NOW);
   assert.deepEqual(out[0].log, []);
 });
+
+test('buildReportHTML includes item names and log text', () => {
+  const items = D.migrate(
+    [
+      {
+        name: 'Alpha Project',
+        priority: 'critical',
+        log: [{ ts: NOW - 86400000, text: 'first update' }],
+        addedAt: NOW,
+      },
+      { name: 'Beta Work', priority: 'medium', log: [], addedAt: NOW },
+    ],
+    NOW
+  );
+  const html = D.buildReportHTML(items, NOW);
+  assert.ok(html.includes('ALPHA PROJECT'), 'item name uppercased');
+  assert.ok(html.includes('first update'), 'log text included');
+  assert.ok(html.includes('BETA WORK'), 'second item included');
+});
+
+test('buildReportHTML excludes archived items', () => {
+  const items = D.migrate(
+    [
+      { name: 'Live One', addedAt: NOW },
+      { name: 'Gone Away', archivedAt: NOW - 1000, addedAt: NOW - 2000 },
+    ],
+    NOW
+  );
+  const html = D.buildReportHTML(items, NOW);
+  assert.ok(html.includes('LIVE ONE'), 'live item present');
+  assert.ok(!html.includes('GONE AWAY'), 'archived item absent');
+});
+
+test('buildReportHTML sorts critical before low', () => {
+  const items = D.migrate(
+    [
+      { name: 'Zed', priority: 'low', addedAt: NOW },
+      { name: 'Alpha', priority: 'critical', addedAt: NOW },
+    ],
+    NOW
+  );
+  const html = D.buildReportHTML(items, NOW);
+  assert.ok(html.indexOf('ALPHA') < html.indexOf('ZED'), 'critical before low');
+});
+
+test('buildReportHTML escapes HTML special characters', () => {
+  const items = D.migrate([{ name: 'A & B <test>', addedAt: NOW }], NOW);
+  const html = D.buildReportHTML(items, NOW);
+  assert.ok(html.includes('A &amp; B &lt;TEST&gt;'), 'special chars escaped and uppercased');
+});

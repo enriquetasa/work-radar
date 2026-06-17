@@ -122,6 +122,35 @@ ipcMain.handle('data:import', async () => {
   return await readJSON(filePaths[0]);
 });
 
+ipcMain.handle('data:exportPDF', async (_e, html) => {
+  const { canceled, filePath } = await dialog.showSaveDialog(win, {
+    title: 'Export PDF Report',
+    defaultPath: `work-radar-report-${new Date().toISOString().slice(0, 10)}.pdf`,
+    filters: [{ name: 'PDF', extensions: ['pdf'] }],
+  });
+  if (canceled || !filePath) return { ok: false };
+  const tmpPath = path.join(app.getPath('temp'), `wr-report-${Date.now()}.html`);
+  const pw = new BrowserWindow({ show: false });
+  try {
+    await fsp.writeFile(tmpPath, html, 'utf8');
+    await pw.loadFile(tmpPath);
+    const pdfBuffer = await pw.webContents.printToPDF({
+      pageSize: 'A4',
+      printBackground: false,
+      margins: { marginType: 'default' },
+    });
+    await fsp.writeFile(filePath, pdfBuffer);
+    log.info('exported PDF report', { path: filePath });
+    return { ok: true, path: filePath };
+  } catch (err) {
+    log.error('PDF export failed', { err });
+    return { ok: false, error: err.message };
+  } finally {
+    pw.close();
+    await fsp.unlink(tmpPath).catch(() => {});
+  }
+});
+
 ipcMain.handle('data:revealBackups', async () => {
   try {
     await fsp.mkdir(BACKUP_DIR(), { recursive: true });
@@ -163,7 +192,8 @@ function buildMenu() {
         { label: 'New Contact', accelerator: 'CmdOrCtrl+N', click: send('new') },
         { label: 'Search', accelerator: 'CmdOrCtrl+F', click: send('search') },
         { type: 'separator' },
-        { label: 'Export Backup…', accelerator: 'CmdOrCtrl+E', click: send('export') },
+        { label: 'Export JSON Backup…', accelerator: 'CmdOrCtrl+E', click: send('export') },
+        { label: 'Export PDF Report…', accelerator: 'CmdOrCtrl+Shift+E', click: send('exportPDF') },
         { label: 'Import Backup…', accelerator: 'CmdOrCtrl+I', click: send('import') },
         { label: 'Reveal Auto-Backups', click: send('reveal') },
         ...(isMac ? [] : [{ type: 'separator' }, { role: 'quit' }]),

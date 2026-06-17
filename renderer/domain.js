@@ -97,6 +97,110 @@
     return list;
   }
 
+  function escapeHtml(str) {
+    return String(str)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
+  }
+
+  // Build a printable HTML report of all live (non-archived) items, grouped by
+  // priority and sorted by name within each group. Logs are shown chronologically
+  // (oldest-first) so they read as a narrative for supervisors.
+  function buildReportHTML(items, now = Date.now()) {
+    const date = fdt(now);
+    const live = items
+      .filter((i) => !i.archivedAt)
+      .slice()
+      .sort((a, b) => PRANK[a.priority] - PRANK[b.priority] || a.name.localeCompare(b.name));
+
+    const PRIORITY_LABEL = { critical: 'CRITICAL', high: 'HIGH', medium: 'MEDIUM', low: 'LOW' };
+    const PRIORITY_COLOR = {
+      critical: '#b71c1c',
+      high: '#e65100',
+      medium: '#1b5e20',
+      low: '#006064',
+    };
+    const STATUS_LABEL = { active: 'ACTIVE', watch: 'WATCH', dormant: 'DORMANT' };
+
+    // Group items by priority so the report has clear sections.
+    const groups = ['critical', 'high', 'medium', 'low']
+      .map((p) => ({ priority: p, items: live.filter((i) => i.priority === p) }))
+      .filter((g) => g.items.length > 0);
+
+    const groupsHTML = groups
+      .map((g) => {
+        const itemsHTML = g.items
+          .map((item) => {
+            const meta = [STATUS_LABEL[item.status], item.category].filter(Boolean).join(' · ');
+            const notesHTML = item.notes
+              ? `<div class="item-notes">${escapeHtml(item.notes)}</div>`
+              : '';
+            const logHTML =
+              item.log && item.log.length
+                ? `<div class="log">
+                    <div class="log-label">LOG</div>
+                    ${item.log
+                      .map(
+                        (e) =>
+                          `<div class="log-entry"><span class="log-ts">${fdt(e.ts)}</span><span>${escapeHtml(e.text)}</span></div>`
+                      )
+                      .join('')}
+                  </div>`
+                : '';
+            return `<div class="item">
+              <div class="item-name">${escapeHtml(item.name.toUpperCase())}</div>
+              <div class="item-meta">${escapeHtml(meta)}</div>
+              ${notesHTML}${logHTML}
+            </div>`;
+          })
+          .join('');
+        return `<div class="group">
+          <div class="group-label" style="color:${PRIORITY_COLOR[g.priority]}">
+            ● ${PRIORITY_LABEL[g.priority]}
+          </div>
+          ${itemsHTML}
+        </div>`;
+      })
+      .join('');
+
+    return `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Work Radar Report — ${date}</title>
+<style>
+  body{font-family:-apple-system,BlinkMacSystemFont,'Helvetica Neue',Arial,sans-serif;
+    color:#1a1a1a;max-width:680px;margin:0 auto;padding:40px 32px;font-size:11px;line-height:1.6}
+  h1{font-size:20px;font-weight:700;letter-spacing:3px;text-transform:uppercase;margin:0 0 4px}
+  .subtitle{font-size:9px;letter-spacing:1px;color:#888;text-transform:uppercase;margin-bottom:36px}
+  .group{margin-bottom:28px}
+  .group-label{font-size:9px;font-weight:700;letter-spacing:3px;text-transform:uppercase;
+    margin-bottom:10px;padding-bottom:6px;border-bottom:2px solid currentColor}
+  .item{padding:12px 0;border-bottom:1px solid #eee;page-break-inside:avoid}
+  .item-name{font-size:13px;font-weight:600;letter-spacing:1px;text-transform:uppercase;margin-bottom:2px}
+  .item-meta{font-size:9px;letter-spacing:1px;color:#666;text-transform:uppercase;margin-bottom:6px}
+  .item-notes{font-size:10px;color:#333;border-left:2px solid #ddd;padding-left:10px;
+    margin-bottom:8px;white-space:pre-wrap;word-break:break-word}
+  .log{margin-top:6px}
+  .log-label{font-size:8px;letter-spacing:2px;color:#aaa;text-transform:uppercase;margin-bottom:4px}
+  .log-entry{display:flex;gap:14px;font-size:9px;color:#444;padding:3px 0;
+    border-bottom:1px solid #f5f5f5;word-break:break-word}
+  .log-ts{color:#aaa;flex-shrink:0;font-variant-numeric:tabular-nums}
+  .footer{margin-top:40px;padding-top:12px;border-top:1px solid #eee;
+    font-size:8px;color:#bbb;letter-spacing:1px;text-transform:uppercase}
+</style>
+</head>
+<body>
+  <h1>Work Radar</h1>
+  <div class="subtitle">Status Report — ${date} — ${live.length} active contact${live.length !== 1 ? 's' : ''}</div>
+  ${groupsHTML}
+  <div class="footer">Generated ${date} · Work Radar v2</div>
+</body>
+</html>`;
+  }
+
   // Merge two lists by id: incoming overwrites existing, new ids appended.
   function mergeById(base, inc) {
     const m = new Map(base.map((i) => [i.id, i]));
@@ -138,6 +242,8 @@
     selectVisible,
     mergeById,
     blipXY,
+    escapeHtml,
+    buildReportHTML,
   };
 
   if (typeof module === 'object' && module.exports) {
