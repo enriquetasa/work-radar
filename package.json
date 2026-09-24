@@ -42,6 +42,7 @@
       "logger.js",
       "sync/**/*",
       "renderer/**/*",
+      "build/icon.png",
       "package.json"
     ],
     "mac": {

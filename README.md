@@ -39,6 +39,153 @@ Writes are atomic (temp file + rename), so a crash mid-save can't corrupt it. A 
 
 Unlike the old single-file HTML version, this does **not** depend on browser storage or the file's path. Move the app, rename it, doesn't matter — the data directory is stable.
 
+## Optional sync (Supabase)
+
+Work Radar is **local-first**: the JSON file described above is always the
+source of truth, and the app works fully offline with zero setup. Sync is an
+entirely optional layer on top — if it isn't configured, no sign-in UI is
+shown at all and nothing changes about how the app behaves.
+
+When configured, sync lets the same data follow you between machines:
+
+- Every local change is pushed to a Supabase project; changes made elsewhere
+  are pulled and merged in (newest edit wins per item, log entries are
+  additive and never lost).
+- A Realtime subscription nudges the app to pull promptly when something
+  changes elsewhere, backed by a 60-second poll and a check on window focus
+  so it stays eventually consistent either way.
+- The secret Supabase key never ships in the app — only the **publishable**
+  key does, which is a public identifier, not a secret. Row Level Security
+  on the server is what actually protects your data: each user can only
+  ever read or write their own rows.
+
+### Setting up a Supabase project
+
+The app never creates the server side of sync for you — a hosted project
+needs three things set up before sign-in or sync will work at all (see
+[Phase 0 of the sync plan](docs/supabase-sync-plan.md#phases) and the
+[Sign-in flow](docs/supabase-sync-plan.md#sign-in-flow) for the full
+detail):
+
+1. **Apply the migrations** in `supabase/migrations` — the tables, RLS
+   policies and `push_*` RPCs sync depends on don't exist otherwise, and
+   every push/pull will fail with `SYNC ERROR`:
+
+   ```bash
+   npx supabase link --project-ref <your-project-ref>
+   npx supabase db push
+   ```
+
+2. **Set the auth redirect** — in the hosted project's Auth settings, set
+   both **Site URL** and **Redirect URLs** to
+   `http://127.0.0.1:54390/auth/callback` (the app's loopback callback
+   address), and set the magic-link expiry to 10 minutes. If these don't
+   match exactly, Supabase sends the browser somewhere else and the sign-in
+   code exchange never happens.
+3. **Turn off sign-ups and create your user by hand** — the app signs in
+   with `shouldCreateUser: false`, so it never creates accounts itself. In
+   the dashboard, disable public sign-ups and create the user(s) who should
+   be able to sign in; anyone else gets a sign-in error instead of "CHECK
+   YOUR INBOX".
+
+### Configuring it
+
+Sync is disabled unless the app can find a Supabase URL and publishable key,
+checked in this order:
+
+1. **Environment variables** — `WORK_RADAR_SUPABASE_URL` and
+   `WORK_RADAR_SUPABASE_KEY`:
+
+   ```bash
+   WORK_RADAR_SUPABASE_URL="https://your-project.supabase.co" \
+   WORK_RADAR_SUPABASE_KEY="your-publishable-key" \
+   npm start
+   ```
+
+2. **A `sync-config.json` file** dropped into the app's `userData` directory
+   (the same folder the data file lives in — see "Where your data lives"
+   above), for a packaged build where setting env vars isn't convenient:
+
+   ```json
+   {
+     "url": "https://your-project.supabase.co",
+     "publishableKey": "your-publishable-key"
+   }
+   ```
+
+Never commit real values for either — keep them out of version control, per
+the secrets rule (env vars locally, or the `userData` file on a real
+machine). If neither is present, sync and auth are fully disabled and the
+app behaves exactly as it did before sync existed.
+
+### Signing in
+
+Sign-in uses a passwordless magic-link email (no passwords stored anywhere):
+
+1. Enter your email in the auth panel and submit. The panel switches to
+   "CHECK YOUR INBOX".
+2. Click the link in the email **on the same machine** you signed in from —
+   the flow uses PKCE, and only that machine holds the matching verifier.
+   Keep Work Radar open and click the link within 10 minutes, the loopback
+   listener's timeout. If you instead see a "port 54390 in use" error
+   before any email is sent, close whatever else is using that port and
+   try again — the app never falls back to a different port.
+3. The link opens a local page confirming you can close the tab and return
+   to Work Radar; the app exchanges the code for a session in the
+   background and the panel updates to show you're signed in.
+4. **Radar → Sign Out** ends the session.
+
+The signed-in session is stored encrypted on disk (via Electron's
+`safeStorage`), so you stay signed in across restarts.
+
+Signing in also requires an OS-level secret store — Keychain on macOS, DPAPI
+on Windows, or a libsecret/kwallet-backed Secret Service on Linux. Without
+one, `safeStorage` has nothing to use, auth stays disabled (no sign-in UI
+appears) and an error is logged, even with a valid sync config. On Linux
+without a keyring/D-Bus secret service, `safeStorage` may still report
+itself available via its `basic_text` backend — in that case the session is
+only obfuscated on disk, not meaningfully encrypted.
+
+### Sync status indicator
+
+Once signed in, a status indicator appears in the header:
+
+| Indicator      | Meaning                                                            |
+| -------------- | ------------------------------------------------------------------ |
+| `◈ SYNCED`     | Everything local has been pushed; nothing pending.                 |
+| `◈ PENDING`    | A local change is queued to push (or just about to be).            |
+| `◈ OFFLINE`    | The last sync attempt couldn't reach Supabase; will retry.         |
+| `◈ SYNC ERROR` | The last sync attempt failed for a reason other than connectivity. |
+
+The indicator is hidden entirely when sync isn't configured, or while
+signed out.
+
+### Developing against sync
+
+Sync-related unit tests (`sync/`, `renderer/*-view.js`) run as part of
+`npm test`/`npm run check` using fakes — no network or database needed.
+
+Exercising the real thing needs a local Supabase stack:
+
+```bash
+npx supabase start     # first time: downloads and starts the local stack
+npx supabase status    # prints the local URL, keys and Mailpit's UI address
+npm run test:integration
+```
+
+`test/integration/*.test.js` creates throwaway users against the local
+stack, drives real sign-in/push/pull/Realtime flows, and cleans up after
+itself. It never touches a hosted Supabase project. See
+`docs/supabase-sync-plan.md` for the full design and per-phase notes.
+
+### Open item: work data needs a security/IT sign-off
+
+Work Radar's data (people and projects at Octopus) is company data. Before
+pointing sync at real data, check with security/IT — they may prefer a
+company-owned Supabase organization over a personal one. Until that
+sign-off happens, develop and test against the local Supabase stack with
+fake data only.
+
 ## Migrating from the browser version
 
 The old `work-radar.html` stored data in browser `localStorage`, which the Electron app can't read. To bring it over: open the old file, hit **EXPORT** to get a JSON backup, then in the Electron app hit **IMPORT** and select it. Merge is non-destructive: for a matching ID, whichever side was edited more recently wins; everything else is added.
@@ -60,6 +207,8 @@ npm run lint       # eslint
 npm run format     # prettier --write   (format:check to verify only)
 npm run check      # lint + format:check + test — the pre-merge gate
 npm run icon       # regenerate build/icon.* from scripts/make-icon.js
+npm run test:integration   # sync tests against a local Supabase stack — see
+                            # "Developing against sync" above
 ```
 
 `npm run build` runs the icon generator first (`prebuild`).
@@ -77,10 +226,16 @@ renderer/        UI. No Node access; talks to disk only through radarAPI over IP
                  Loaded as a browser global AND require()-able under node:test.
   app.js         State store, render, actions. Falls back to localStorage if run
                  outside Electron, so the same code works in a plain browser too.
+  sync-view.js,
+  auth-view.js   Pure view-state helpers for the sync/auth UI (see below).
+sync/            Optional sync/auth (main-process only). See "Optional sync
+                 (Supabase)" above and docs/supabase-sync-plan.md.
+supabase/        Local Supabase project config + SQL migrations for sync.
 scripts/
   make-icon.js   Renders the radar dock icon to build/icon.* (zero deps).
 test/
-  domain.test.js Unit tests for domain.js.
+  *.test.js            Unit tests (fakes only, no network).
+  integration/*.test.js Tests against a real local Supabase stack.
 ```
 
 Security defaults: `contextIsolation: true`, `nodeIntegration: false`, `sandbox: true`, CSP locked to self. The renderer never sees Node or the filesystem directly.

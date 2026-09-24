@@ -1489,6 +1489,45 @@ phase would be complete in one pass.
   promise while the real cycle it triggered was still in flight, making
   the `finally` block's await a no-op just when it matters most.
 
+## Phase 7 notes (packaging and docs)
+
+`@supabase/supabase-js` was already a runtime `dependencies` entry (not
+`devDependencies`, set back in Phase 2). `package.json`'s `build.files` listed
+every main-process path the app requires at runtime except one:
+`main.js` reads `build/icon.png` for the window icon (and the macOS dev-mode
+dock icon) behind an `existsSync` guard, but `build/` wasn't in `build.files`,
+so a packaged app would silently ship with no window/dock icon from that
+file. Fixed by adding `"build/icon.png"` to `build.files` alongside `main.js`,
+`preload.js`, `logger.js`, `sync/**/*`, `renderer/**/*` (which also covers
+`renderer/domain.js`, required directly by `sync/sync-engine.js`) and
+`package.json` itself. Verified two ways:
+
+- Every `require(...)` reachable from `main.js` at runtime (walked through
+  all of `sync/*.js`) resolves to either a Node builtin, `electron`,
+  `@supabase/supabase-js`, or a path already covered by one of the globs
+  above — nothing pointed outside them.
+- A real packaging smoke test, `npx electron-builder --linux --dir`,
+  produces `dist/linux-unpacked/`; unpacking its `resources/app.asar`
+  (`asar list`) confirms `main.js`, `preload.js`, `logger.js`, every file
+  under `sync/`, `renderer/domain.js`, `build/icon.png`, `package.json` and
+  `node_modules/@supabase/supabase-js` (and its own dependencies,
+  `auth-js`/`postgrest-js`/`realtime-js`/`storage-js`/`functions-js`) are
+  all present in the packaged app. electron-builder includes production
+  `dependencies`' `node_modules` automatically alongside the `build.files`
+  glob, which is why `node_modules` itself never needed to be listed there.
+  `dist/` is already gitignored and was not committed.
+
+Docs: README additions cover a new "Optional sync (Supabase)" section
+describing what sync does, the two ways to configure it (env vars or a
+`userData` `sync-config.json`, both documented with placeholder values only —
+see the secrets rule), the magic-link sign-in flow, the four sync-status
+indicator meanings, and how to run the local Supabase stack plus
+`npm run test:integration` for development. The Architecture tree now also
+lists `sync/`, `supabase/` and `test/integration/`. The open item about work
+data needing a security/IT sign-off before real use (already tracked below
+under "Open items") is called out in the README too, next to the sync
+section, so it isn't only visible to someone reading this plan doc.
+
 ## Open items
 
 - Work data (people and projects at Octopus) would live in a personal Supabase
