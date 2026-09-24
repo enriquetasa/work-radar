@@ -381,6 +381,12 @@ const SyncConfigPrompt = {
     }
     if (!needsKey) return;
     document.getElementById('sync-key-overlay').hidden = false;
+    // aria-modal alone doesn't stop Tab (or a click) from reaching
+    // elements behind the overlay (found in review) — #app is the
+    // overlay's only sibling in index.html, so marking it inert blocks
+    // focus and pointer interaction with everything behind the overlay
+    // without making the overlay itself inert too.
+    document.getElementById('app').inert = true;
     document.getElementById('sync-key-form').addEventListener('submit', (e) => {
       e.preventDefault();
       this.save();
@@ -390,6 +396,7 @@ const SyncConfigPrompt = {
   },
   dismiss() {
     document.getElementById('sync-key-overlay').hidden = true;
+    document.getElementById('app').inert = false;
   },
   showError(message) {
     const err = document.getElementById('sync-key-error');
