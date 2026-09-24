@@ -601,7 +601,16 @@ app.whenReady().then(async () => {
   }
 
   await dailyBackup();
-  initSyncAndAuth();
+  try {
+    initSyncAndAuth();
+  } catch (err) {
+    // A throw here (found in review) must never stop buildMenu()/
+    // createWindow() below from running — sync is optional, and a
+    // failure bringing it up must degrade to the app opening fully
+    // local, exactly like an unconfigured/no-secret-store run, not to no
+    // window opening at all.
+    log.error('initSyncAndAuth failed at startup — continuing fully local', { err });
+  }
   buildMenu();
   await createWindow();
 
