@@ -650,6 +650,211 @@ Phase 3 only gets a session; pushing/pulling rows is Phase 4.
   already signed out (harmless no-op, already called out above as
   deferred to a later pass). Both are still open, not forgotten.
 
+## Phase 4-5 notes (sync engine, first sync)
+
+Implemented in `sync/sync-engine.js`, plus small pure helper modules it
+depends on (`sync/mapping.js`, `sync/outbox.js`, `sync/sync-state.js`,
+`sync/keyset.js`, `sync/classify-error.js`, `sync/stale-remediation.js`,
+`sync/atomic-json-file.js`) and thin wiring in `main.js`/`preload.js`/
+`renderer/app.js`. Built in one pass rather than two separate phases —
+first sync (Phase 5) turned out to be almost entirely outbox bookkeeping
+(“mark everything pending”) inside the same engine, not a separate code
+path, so splitting it into its own commit would have meant re-opening
+`sync-engine.js` immediately after.
+
+- **Everything that isn't Electron is a plain, dependency-injected
+  module**, same split as Phase 3's `sync/auth-*`. `sync/sync-engine.js`
+  takes the one supabase-js `client` main.js already built for auth (see
+  `buildSyncEngine()` in `main.js` — it shares auth's client rather than
+  creating a second one) plus four push/pull functions that default to
+  real implementations built from `client`, but can be overridden
+  directly. This is the main testability decision of the phase: faking
+  four plain async functions (`pushItemsRpc`, `pushLogEntriesRpc`,
+  `pullItemsPage`, `pullLogEntriesPage`) is far simpler and more
+  reliable than mocking the full `.from(...).select(...).gt(...).or(...)`
+  PostgREST builder chain, and `test/sync-engine.test.js` does exactly
+  that. `test/integration/sync-engine.test.js` then exercises the real
+  default implementations against local Supabase.
+- **The outbox is computed by main, never reported by the renderer.**
+  `sync/outbox.js`'s `snapshotOf(data)` reduces a data file to `{ items:
+{id: updatedAt}, logEntryIds: [...] }` — enough to answer "did this
+  change since the last time the engine looked?" — and
+  `diffSnapshot(prev, next)` is the actual diff: an item is pending if
+  its id is new or its `updatedAt` moved; a log entry is pending if its
+  id is new (log entries never change once written, so that's the only
+  way one can need pushing). `sync-engine.js`'s `recordLocalSave()` runs
+  this diff on every `data:save`, comparing the merged result against
+  the last snapshot persisted in `sync-state.json` — the renderer's
+  payload is just data, not a change list.
+- **`sync-state.json`** (`sync/sync-state.js` for the shape,
+  `sync/atomic-json-file.js` for the atomic read/write — same temp-file-
+  then-rename pattern as the main data file and Phase 3's
+  `session-storage.js`) lives in `userData` next to the data file and
+  persists, per signed-in user id (not just "this machine" — a machine
+  could in principle sign out and into a different account):
+  `pendingItemIds`/`pendingLogEntryIds` (the outbox), `itemsCursor`/
+  `logEntriesCursor` (ms epoch, or `null` before the first pull),
+  `snapshot` (outbox.js's shape, for the next diff) and `firstSyncDone`.
+  Keying by user id, not machine, is what makes "first sync" correct if
+  the same machine is ever signed into a second account.
+- **One mapping module, two shapes, unit-tested with round-trip tests.**
+  `sync/mapping.js` is the only place ms-epoch numbers (domain.js's
+  internal representation) convert to/from `timestamptz`: `itemToPushRow`/
+  `logEntryToPushRow` produce the camelCase-with-ISO-strings shape
+  `push_items`/`push_log_entries` expect, `rowToItem`/`rowToLogEntry`
+  consume the snake_case-with-ISO-strings shape a plain `select('*')`
+  pull returns. `archivedAt`/`deletedAt` come back as `undefined` (not
+  `null`) when unset, matching domain.js's own convention.
+- **Push order is items then log entries, in batches** (`pushBatchSize`,
+  default 200), per the plan and because `push_log_entries` rejects a
+  row as `item_not_found` until its parent item has synced. A rejected
+  log entry just stays in the outbox — retried once the item itself
+  succeeds, no strict global ordering needed beyond "try items first
+  every cycle" (see the Phase 2 notes on why the RPC is built to allow
+  this rather than erroring).
+- **The known `stale_or_not_owned` tie-break gap is handled, not just
+  documented.** `sync/stale-remediation.js`'s `localWinsOverRemote`
+  answers "does the client's own `mergeItem`, given both versions,
+  actually still prefer the local one?" — using `mergeItem` itself
+  (injected, so this has no dependency on `renderer/`), not a
+  reimplementation of its tie-break chain. `sync-engine.js` only fetches
+  the remote row and re-stamps+leaves-pending on that rare exact-
+  `updated_at`-tie disagreement, never on an ordinary "remote is
+  genuinely newer" rejection (see `push_rpc_functions.sql`'s comment for
+  why the RPC can't reproduce the full chain in SQL).
+- **Pull uses a lookback window and (synced_at, id) keyset pagination**,
+  per the `synced_at_trigger` migration's own comment on why a bare
+  `gt(cursor)` isn't safe: `sync/keyset.js`'s `pullAll` starts each pull
+  from `cursor - lookbackMs` (or the epoch, for a brand-new machine's
+  first pull ever) and pages using `keysetOrFilter`, the standard
+  two-clause PostgREST expansion of a compound-key `>` comparison
+  (`synced_at > X OR (synced_at = X AND id > Y)`) — needed because every
+  row in one push shares a single `synced_at`, so a page boundary can
+  fall inside a batch. Re-pulling the lookback window on every cycle is
+  safe because `mergeItem`/`unionLogs` are idempotent.
+- **The cursor (and the outbox snapshot) are persisted only after the
+  merge has actually been written to disk**, covered by a unit test
+  asserting write order. A crash in between just re-pulls the same
+  (idempotent) rows next cycle instead of losing them. The snapshot is
+  refreshed on every pull-driven write too, not just on `recordLocalSave`
+  — without this, an item nobody edits locally again (pulled once, never
+  touched) would have no snapshot entry and get flagged "changed" (by
+  the diff, which has never _seen_ its `updatedAt` before) on every
+  future local save forever — harmless (the resulting push is rejected
+  as `stale_or_not_owned`) but noisy.
+- **Items are pulled and merged in fully before log entries are even
+  requested**, mirroring the push order. This turns "a log entry's
+  parent item is already on disk by the time it's processed" from a
+  race into a guarantee: `log_entries.item_id` is a composite FK on
+  `items(id, user_id)`, so a log entry can only exist in the database
+  once its item does, and by pulling items first every cycle, any item
+  this account has ever synced is on disk before its log entries are
+  grouped and merged in. Log entries pulled for an item id somehow not
+  found locally (should be unreachable given the above) are logged as
+  an error and the log-entries cursor is _not_ advanced for that cycle,
+  rather than silently dropping them.
+- **The save race**: main merges an incoming `data:save` payload with
+  what's currently on disk (`recordLocalSave`, via the Phase 1 domain
+  merge) instead of overwriting it outright, per the option the plan's
+  Phase 4 line calls out. This is what stops a renderer save that was
+  queued before a background pull just merged in a remote change from
+  clobbering it — the merge is exactly the same "newest `updatedAt`
+  wins" rule that already reconciles two machines, applied here to
+  reconcile "the renderer's stale view" against "what main just wrote".
+  `main.js`'s `data:save` handler only takes this path while the sync
+  engine is actually running (`syncEngineRunning`); fully local mode is
+  unchanged. Covered by a unit test that seeds a newer "already pulled"
+  version on disk and asserts a stale save can't undo it.
+- **Triggers**: startup (`start()`, once signed in — called from
+  `authService.onChange()` in `main.js`, never on its own), window focus
+  (`BrowserWindow`'s own `focus` event, wired in `createWindow()` so a
+  window recreated after all windows close on macOS still gets it), a
+  60-second interval (`setInterval` inside `start()`), and a debounced
+  trigger after `recordLocalSave` (default 3s, resets on every save so a
+  burst of edits pushes once, shortly after the burst ends). All four
+  funnel through the same `triggerNow()`, which coalesces overlapping
+  triggers into at most one cycle running at a time and re-runs once
+  more immediately after if another trigger fired mid-cycle, rather than
+  queuing an unbounded backlog.
+- **Retry with backoff, classified offline vs error.**
+  `sync/classify-error.js` is a best-effort heuristic (there's no
+  `navigator.onLine` in the main process, and supabase-js doesn't tag
+  its own errors as network-vs-other) over the shapes `fetch`/undici and
+  Postgres actually produce, erring towards OFFLINE on an ambiguous bare
+  `TypeError` since a network blip is far more likely in practice than a
+  genuinely new failure mode. A cycle that throws schedules a retry via
+  `triggerNow()` at `min(backoffMaxMs, backoffBaseMs * 2^attempts)`
+  (defaults 2s base, 5 min cap); any cycle that completes without
+  throwing resets the backoff, regardless of whether it ended `pending`
+  (row-level rejections, e.g. `item_not_found` waiting on its item) or
+  `synced`.
+- **Status in the header**: `SYNCED` (nothing pending) `· PENDING`
+  (outbox non-empty, or the last save just queued something) `·
+OFFLINE · ERROR`, pushed over `sync:stateChanged` (`{ state }`, `state`
+  `null` meaning "hide it") and rendered by the pure
+  `renderer/sync-view.js`'s `computeSyncView` — same dual-mode
+  (browser global + CommonJS-under-node:test) pattern as `domain.js`/
+  `auth-view.js`, and the same reason: there's no DOM test harness here,
+  so the view/hide/colour-class decision is pulled out to be unit-
+  testable on its own. Colour-keyed to the palette `domain.js` already
+  uses for status/priority (green=SYNCED, amber=PENDING, grey=OFFLINE,
+  red=ERROR). Lives in `#auth-panel` next to the sign-in status, hidden
+  until main ever pushes a real state — which only happens once sync is
+  configured _and_ signed in, and main explicitly pushes `{ state: null
+}` on sign-out to hide it again, per the plan's "hidden when sync
+  isn't configured, and a signed-out state" requirement.
+- **Reload after a pull-driven merge** is a main → renderer push
+  (`sync:reload`, no payload) rather than main handing the renderer the
+  merged data directly — the renderer's `Store.load()` is already the
+  single path that reads the data file and runs the Phase 1
+  dedup-through-`mergeState` pass on load, so reusing it here (via a new
+  `Sync.reload()` in `app.js`) means there is exactly one "read the data
+  file into `Store`" code path, not two that could drift.
+- **First sync (Phase 5) is outbox bookkeeping, not a data-copying
+  step.** `bootstrapFirstSyncIfNeeded()` runs as the first step of every
+  cycle; if `firstSyncDone` is false for this user, it reads the current
+  data file, adds every existing item id and log entry id to the
+  outbox, snapshots the file, and sets `firstSyncDone` — all persisted
+  _before_ the push that follows, so a crash mid-first-sync retries the
+  whole thing next cycle rather than silently skipping it (re-marking
+  already-pushed ids is a harmless no-op; the RPCs are idempotent).
+  Nothing here touches local data or bypasses the ordinary push-then-
+  pull-then-merge that follows in the same cycle, which is what makes
+  "never replace local data with remote data" fall out of the design
+  rather than needing a special case: the first cycle pushes this
+  machine's own data before it ever pulls anything, and every pull from
+  then on (first or not) goes through the same union-based `mergeState`.
+  Covered by an integration test with two machines that each have
+  data before ever syncing, including an overlapping id where the
+  genuinely newer copy must win on both sides afterward.
+- **Structured logs**: every cycle logs one `sync cycle complete` (or
+  `sync cycle failed`) line with a `cycleId` (`crypto.randomUUID()`,
+  correlating every line one cycle produces — same pattern as Phase 3's
+  `attemptId`), duration, per-table push/pull counts, and the resulting
+  status; individual row rejections and the stale-push remediation path
+  log with the same `cycleId` for context.
+- **Integration tests** (`test/integration/sync-engine.test.js`) run two
+  real `sync/sync-engine.js` instances — independent tmp `userData`
+  dirs, independent supabase-js sessions, same underlying account — as
+  "two machines" against local Supabase, using the engine's real default
+  push/pull implementations (not fakes): offline edits made
+  independently on both converge to identical state after syncing; a
+  purge tombstone made on one propagates to the other as a tombstone,
+  never a hard delete; log entries added concurrently on both machines
+  (each racing ahead of the other pulling) both survive on both sides
+  once fully synced; and first sync from two machines with overlapping
+  data (including a shared id where one side's edit is genuinely newer)
+  converges without either side's push replacing the other's newer data.
+  `test/sync-engine.test.js` covers the engine's own logic (push/pull
+  ordering, the save race, cursor-after-merge persistence, first-sync
+  bootstrap, status/backoff transitions) with fakes, including a class
+  of test-hygiene bug found while writing it: any test leaving a
+  `recordLocalSave`-scheduled debounce timer or a failed cycle's retry
+  timer running past the end of the test hangs the whole file (the
+  timer eventually fires against a now-torn-down fixture, sometimes
+  cascading into an unbounded offline-retry loop) — every test that
+  creates an engine now stops it in a `finally` block.
+
 ## Open items
 
 - Work data (people and projects at Octopus) would live in a personal Supabase

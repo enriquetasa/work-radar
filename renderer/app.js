@@ -10,6 +10,7 @@
 // so it can be unit-tested under node:test without a DOM.
 const D = window.WorkRadarDomain;
 const AV = window.WorkRadarAuthView;
+const SV = window.WorkRadarSyncView;
 const { PC, SC, CX, CY, R, BACKUP_DAYS, uid, fdt, daysSince, isStale, blipXY, stripTombstones } = D;
 const HAS_API = typeof window !== 'undefined' && !!window.radarAPI;
 
@@ -327,6 +328,78 @@ const Auth = {
     } catch (err) {
       console.error('sign-in failed', err);
       this.showError('SIGN-IN FAILED');
+    }
+  },
+};
+
+/* ---------- Sync status (Phases 4-5 — see docs/supabase-sync-plan.md)
+   ----------
+   Push-only from main: there is no invoke to ask for the current status
+   (unlike Auth.init()'s authStatus() call) because the indicator starts
+   hidden and simply stays that way until main ever pushes something —
+   which it only does once sync is configured AND the user is signed in
+   (main hides it again with `{ state: null }` on sign-out). `onSyncReload`
+   is main telling the renderer "I just merged in a pull — your in-memory
+   Store is now behind the data file", so it reloads and re-renders
+   rather than trusting its own state. */
+const Sync = {
+  init() {
+    if (!HAS_API || !window.radarAPI.onSyncStateChanged) return;
+    window.radarAPI.onSyncStateChanged((status) => this.render(status));
+    if (window.radarAPI.onSyncReload) {
+      window.radarAPI.onSyncReload(() => this.reload());
+    }
+    // Ask for the current status once, the same way Auth.init() calls
+    // authStatus() — the push alone can otherwise reach nobody (main can
+    // start the engine and push a status before this listener above is
+    // even registered, and identical pushes are deduped), leaving the
+    // indicator stuck hidden for the rest of the session (found in
+    // review) — same again after a window reload.
+    if (window.radarAPI.syncStatus) {
+      window.radarAPI
+        .syncStatus()
+        .then((state) => this.render({ state }))
+        .catch((err) => console.error('syncStatus failed', err));
+    }
+  },
+  render(status) {
+    const view = SV.computeSyncView(status);
+    const el = document.getElementById('sync-status');
+    el.hidden = view.hidden;
+    el.textContent = view.label;
+    el.className = 'auth-status' + (view.className ? ' ' + view.className : '');
+  },
+  async reload() {
+    try {
+      // Merges the file's contents into Store rather than replacing it
+      // (Store.load() does the latter) — a plain replace can lose an
+      // edit made in this renderer that hasn't reached disk yet: a save
+      // still in-flight when this runs would have Store rolled back to
+      // the pre-edit copy, and a save still sitting in scheduleSave's
+      // 120ms debounce window would later serialize the *reloaded*
+      // (pre-edit) Store, overwriting the edit for good (found in
+      // review — the same class of save race this whole phase exists to
+      // fix, just on the renderer's side of the file instead of main's).
+      // Safe because it's the same last-writer-wins merge that already
+      // reconciles two machines — domain.js's migrate() first, in case
+      // the file on disk predates a schema bump this renderer already
+      // knows about.
+      const fromDisk = await Persist.load();
+      if (fromDisk) {
+        const merged = D.mergeState(
+          {
+            items: D.migrate(Array.isArray(fromDisk.items) ? fromDisk.items : []),
+            arch: D.migrate(Array.isArray(fromDisk.arch) ? fromDisk.arch : []),
+          },
+          { items: Store.items, arch: Store.arch }
+        );
+        Store.items = merged.items;
+        Store.arch = merged.arch;
+        Store.lastExport = fromDisk.lastExport ?? Store.lastExport;
+      }
+      render();
+    } catch (err) {
+      console.error('reload after sync merge failed', err);
     }
   },
 };
@@ -848,6 +921,7 @@ function drawTicks() {
   startClock();
   startSweep();
   Auth.init().catch((err) => console.error('Auth.init failed', err));
+  Sync.init();
   try {
     await Store.load();
   } catch (err) {

@@ -189,6 +189,25 @@ select {
   color: #ff9100;
 }
 
+/* Sync engine status (Phases 4-5, see docs/supabase-sync-plan.md) —
+   same .auth-status look as the auth panel it lives next to, colour
+   keyed to the same palette domain.js uses for status/priority
+   (SYNCED=active green, PENDING=watch amber, OFFLINE=dormant grey,
+   ERROR=critical red). Hidden by default; app.js only unhides it once
+   main pushes a real state (never while signed out or unconfigured). */
+#sync-status.sync-synced {
+  color: #00e676;
+}
+#sync-status.sync-pending {
+  color: #ff9100;
+}
+#sync-status.sync-offline {
+  color: #546e7a;
+}
+#sync-status.sync-error {
+  color: #f44336;
+}
+
 #toolbar {
   border-bottom: 1px solid #1a5c2c;
   background: #020e07;

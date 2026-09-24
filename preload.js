@@ -19,4 +19,15 @@ contextBridge.exposeInMainWorld('radarAPI', {
   authSignIn: (email) => ipcRenderer.invoke('auth:signIn', email),
   authSignOut: () => ipcRenderer.invoke('auth:signOut'),
   onAuthStateChanged: (cb) => ipcRenderer.on('auth:stateChanged', (_e, status) => cb(status)),
+
+  // Sync engine (Phases 4-5, see docs/supabase-sync-plan.md). Mostly
+  // push-only from main, but syncStatus() lets the renderer ask for the
+  // current status once on load/reload — the push alone can otherwise
+  // reach nobody (main can push before the renderer has registered its
+  // listener) and leave the indicator stuck hidden for the whole session.
+  syncStatus: () => ipcRenderer.invoke('sync:status'),
+  onSyncStateChanged: (cb) => ipcRenderer.on('sync:stateChanged', (_e, status) => cb(status)),
+  // Told to reload after main has merged in a pull — the renderer's own
+  // Store is not the source of truth for that merge, the data file is.
+  onSyncReload: (cb) => ipcRenderer.on('sync:reload', () => cb()),
 });

@@ -39,15 +39,16 @@ module.exports = [
         ...globals.browser,
         WorkRadarDomain: 'readonly',
         WorkRadarAuthView: 'readonly',
+        WorkRadarSyncView: 'readonly',
       },
     },
   },
 
-  // domain.js and auth-view.js are dual-mode: they must run as a browser
-  // global AND as a CommonJS module under node:test, so they see both
-  // global sets.
+  // domain.js, auth-view.js and sync-view.js are dual-mode: they must
+  // run as a browser global AND as a CommonJS module under node:test,
+  // so they see both global sets.
   {
-    files: ['renderer/domain.js', 'renderer/auth-view.js'],
+    files: ['renderer/domain.js', 'renderer/auth-view.js', 'renderer/sync-view.js'],
     languageOptions: {
       ecmaVersion: 2023,
       sourceType: 'script',
