@@ -2,3 +2,7 @@ node_modules/
 dist/
 package-lock.json
 build/
+
+# Local Supabase CLI runtime state (written by `supabase start`/`status`),
+# never hand-edited and not part of the app.
+supabase/.temp/

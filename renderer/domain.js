@@ -8,7 +8,7 @@
    ============================================================ */
 
 (function (root) {
-  const SCHEMA = 2;
+  const SCHEMA = 3;
   const STALE_DAYS = 14; // days without a PING => NEEDS REVIEW
   const BACKUP_DAYS = 7; // nudge to export after this long
   const DAY = 86400000;
@@ -29,6 +29,29 @@
     return Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
   }
 
+  // Small stable string hash (djb2 variant). Used only to derive
+  // deterministic ids for legacy log entries — never for anything that
+  // needs to be collision-proof against adversarial input.
+  function hashString(s) {
+    let h = 5381;
+    for (let i = 0; i < s.length; i++) {
+      h = (h * 33) ^ s.charCodeAt(i);
+    }
+    return (h >>> 0).toString(36);
+  }
+
+  // Legacy log entries (schema v2 and older) have no id. Two machines
+  // migrating the same legacy file independently must assign the same id
+  // to "the same" entry, so it is derived from its content rather than
+  // random (uid()) or positional (array index, which shifts under merge).
+  // itemId and ts are embedded verbatim (not hashed) so only `text` goes
+  // through the lossy hash, keeping the collision surface small; `log_entries.id`
+  // is a global primary key downstream, so a collision would silently drop
+  // an entry or fail a push.
+  function legacyLogId(itemId, ts, text) {
+    return 'lg_' + itemId + '_' + ts + '_' + hashString(text);
+  }
+
   function fdt(ts) {
     return new Date(ts).toISOString().slice(0, 10);
   }
@@ -43,22 +66,80 @@
 
   // Normalise an arbitrary list (legacy data, imports) into the current
   // schema, dropping anything without a name and coercing invalid enums.
+  // Also carries schema v2 (and older) data forward to v3: adds a stable id
+  // to any log entry missing one, and leaves deletedAt (the purge
+  // tombstone marker, new in v3) unset unless already present.
   function migrate(list, now = Date.now()) {
     return list
       .filter((x) => x && x.name)
-      .map((x) => ({
-        id: x.id || uid(),
-        name: String(x.name),
-        status: SC[x.status] ? x.status : 'active',
-        priority: PC[x.priority] ? x.priority : 'medium',
-        category: x.category || '',
-        notes: x.notes || '',
-        addedAt: x.addedAt || now,
-        updatedAt: x.updatedAt || x.addedAt || now,
-        reviewedAt: x.reviewedAt || x.addedAt || now,
-        archivedAt: x.archivedAt || undefined,
-        log: Array.isArray(x.log) ? x.log : [],
-      }));
+      .map((x) => {
+        const id = x.id || uid();
+        // Malformed entries are dropped rather than crashing the whole
+        // migration on a corrupt data file or import: non-objects (null,
+        // strings, ...) outright, and — for entries with no id of their own
+        // (legacy v2 and older) — anything without a finite numeric `ts`,
+        // since legacyLogId needs `ts` to derive a stable id and a
+        // non-numeric one can't be trusted to be comparable across entries.
+        // `text` is coerced to a string (missing/null becomes '') rather
+        // than dropped, since a log entry with real content but no message
+        // text is still worth keeping.
+        const rawLog = Array.isArray(x.log)
+          ? x.log.filter((e) => e && typeof e === 'object' && (e.id || Number.isFinite(e.ts)))
+          : [];
+        // Two identical legacy entries (same item, ts and text) hash to the
+        // same base id; disambiguate with an occurrence index so they don't
+        // collapse into one entry once ids are unioned during a merge. Both
+        // sides migrating the same file independently see entries in the
+        // same array order, so the index stays deterministic across machines.
+        const seen = new Map();
+        const log = rawLog.map((e) => {
+          if (e.id) return { ...e };
+          const text = String(e.text ?? '');
+          const base = legacyLogId(id, e.ts, text);
+          const n = seen.get(base) || 0;
+          seen.set(base, n + 1);
+          return { ...e, text, id: n === 0 ? base : base + '_' + n };
+        });
+        // Under schema v2 (and older), ping/archive/restore/addLogEntry did
+        // not bump updatedAt, so a legacy row's updatedAt can be older than
+        // its reviewedAt, archivedAt, or its newest log entry. If migrate()
+        // left updatedAt as-is, "newest updatedAt wins" would tie two v2-era
+        // copies that really differ in time and let the tie-break (which
+        // doesn't know about any of this) decide arbitrarily — e.g. undoing
+        // an archive+ping by resurrecting an older live backup of the same
+        // item. Taking the max over all of them brings updatedAt up to what
+        // v3 would have recorded. It is a no-op on v3 data, because every v3
+        // mutation already sets updatedAt to at least these values, so this
+        // is safe to run on every load, not just once at the v2->v3 boundary.
+        // The fallback when neither updatedAt nor addedAt is present is 0,
+        // not `now`: two machines migrating the same legacy row independently
+        // must land on the same updatedAt (Math.max below still picks up the
+        // row's own signals, e.g. its newest log ts), or the merge winner
+        // would depend on which machine happened to migrate later.
+        const base = x.updatedAt || x.addedAt || 0;
+        const logMax = log.reduce((m, e) => (e.ts && e.ts > m ? e.ts : m), 0);
+        const updatedAt = Math.max(
+          base,
+          x.reviewedAt || 0,
+          x.archivedAt || 0,
+          x.deletedAt || 0,
+          logMax
+        );
+        return {
+          id,
+          name: String(x.name),
+          status: SC[x.status] ? x.status : 'active',
+          priority: PC[x.priority] ? x.priority : 'medium',
+          category: x.category || '',
+          notes: x.notes || '',
+          addedAt: x.addedAt || now,
+          updatedAt,
+          reviewedAt: x.reviewedAt || x.addedAt || now,
+          archivedAt: x.archivedAt || undefined,
+          deletedAt: x.deletedAt || undefined,
+          log,
+        };
+      });
   }
 
   function serialize(state) {
@@ -73,7 +154,7 @@
   // Filter + sort the current view. Pure: derives from state, never mutates it.
   function selectVisible(state, now = Date.now()) {
     const ui = state.ui;
-    let list = ui.view === 'live' ? state.items.slice() : state.arch.slice();
+    let list = (ui.view === 'live' ? state.items : state.arch).filter((i) => !i.deletedAt);
     const q = ui.search.trim().toLowerCase();
     if (q) {
       list = list.filter((i) =>
@@ -111,7 +192,7 @@
   function buildReportHTML(items, now = Date.now()) {
     const date = fdt(now);
     const live = items
-      .filter((i) => !i.archivedAt)
+      .filter((i) => !i.archivedAt && !i.deletedAt)
       .slice()
       .sort((a, b) => PRANK[a.priority] - PRANK[b.priority] || a.name.localeCompare(b.name));
 
@@ -176,11 +257,129 @@ ${groupsHTML}
 </html>`;
   }
 
-  // Merge two lists by id: incoming overwrites existing, new ids appended.
-  function mergeById(base, inc) {
-    const m = new Map(base.map((i) => [i.id, i]));
-    inc.forEach((i) => m.set(i.id, i));
-    return [...m.values()];
+  // Hide purge tombstones (deletedAt set) from any list rendered to the
+  // user — lists, stats/counts, search, radar blips. They stay in the data
+  // file (see mergeState) so a later merge still sees the deletion.
+  function stripTombstones(list) {
+    return list.filter((i) => !i.deletedAt);
+  }
+
+  // Union two versions of the same item's log by id (append-only, so a
+  // union — never a diff), sorted by ts with id as a deterministic
+  // tie-break so the result never depends on argument order.
+  function unionLogs(a, b) {
+    const m = new Map();
+    (a || []).forEach((e) => m.set(e.id, e));
+    (b || []).forEach((e) => {
+      if (!m.has(e.id)) m.set(e.id, e);
+    });
+    return [...m.values()].sort((x, y) => x.ts - y.ts || (x.id < y.id ? -1 : x.id > y.id ? 1 : 0));
+  }
+
+  // Serialize an item for the tie-break comparison below with a fixed,
+  // sorted key order, so two objects with identical fields compare equal
+  // regardless of the order their keys happen to be in (e.g. rows built
+  // from Supabase, where field order isn't guaranteed). `log` is excluded —
+  // it's compared separately (it's unioned, not tie-broken) and would
+  // otherwise couple the tie-break to log ordering.
+  function stableStringify(item) {
+    const keys = Object.keys(item)
+      .filter((k) => k !== 'log')
+      .sort();
+    return JSON.stringify(item, keys);
+  }
+
+  // Merge two versions of the same item (same id, from two machines/files).
+  // Every field except log is "newest updatedAt wins" — this is uniform
+  // across the whole record, including archivedAt and deletedAt, since
+  // both archive and purge bump updatedAt like any other mutation. That
+  // means a later edit can "resurrect" an item a stale tombstone deleted,
+  // and a later purge always wins over a stale edit. Ties (identical
+  // updatedAt, different content — clock granularity, or edits replayed
+  // twice) are broken deterministically and symmetrically so the winner
+  // never depends on which side is passed as `a` vs `b`.
+  function mergeItem(a, b) {
+    const log = unionLogs(a.log, b.log);
+    let winner;
+    if (a.updatedAt !== b.updatedAt) {
+      winner = a.updatedAt > b.updatedAt ? a : b;
+    } else {
+      // Break the tie on the numeric signals first (reviewedAt, then
+      // archivedAt, then deletedAt) rather than jumping straight to the
+      // text comparison, which compares numbers character by character and
+      // would pick e.g. reviewedAt 99 over 100. Still deterministic and
+      // symmetric (subtraction is antisymmetric); falls back to the text
+      // comparison only once all three are equal too.
+      const numTie =
+        (a.reviewedAt || 0) - (b.reviewedAt || 0) ||
+        (a.archivedAt || 0) - (b.archivedAt || 0) ||
+        (a.deletedAt || 0) - (b.deletedAt || 0);
+      if (numTie !== 0) {
+        winner = numTie > 0 ? a : b;
+      } else {
+        const sa = stableStringify(a);
+        const sb = stableStringify(b);
+        winner = sa >= sb ? a : b;
+      }
+    }
+    return { ...winner, log };
+  }
+
+  // Merge two full states (each { items, arch }) into one. Items can move
+  // between live and archived on either side (archive here, edit there),
+  // so the merge is done over the *union* of both sides' items and
+  // archive lists, keyed by id, and only split back into items/arch by
+  // the winning archivedAt at the end.
+  function mergeState(a, b) {
+    const all = new Map();
+    const absorb = (list) => {
+      list.forEach((i) => {
+        const existing = all.get(i.id);
+        all.set(i.id, existing ? mergeItem(existing, i) : i);
+      });
+    };
+    absorb(a.items);
+    absorb(a.arch);
+    absorb(b.items);
+    absorb(b.arch);
+    const merged = [...all.values()];
+    return {
+      items: merged.filter((i) => !i.archivedAt),
+      arch: merged.filter((i) => i.archivedAt),
+    };
+  }
+
+  // Item mutations. Every one bumps updatedAt to `now` so mergeItem's
+  // "newest updatedAt wins" rule actually sees every change — a mutation
+  // that forgot this bump would let a stale copy on another machine
+  // silently overwrite it, or (for purge) let the item come back from the
+  // dead. Pure: each returns a new item, never mutates the one passed in.
+  // app.js's Actions call these instead of building the patch inline, so
+  // the bump is tested here rather than only reachable through the DOM.
+
+  function pingItem(item, now = Date.now()) {
+    return { ...item, reviewedAt: now, updatedAt: now };
+  }
+
+  function archiveItem(item, now = Date.now()) {
+    return { ...item, archivedAt: now, updatedAt: now };
+  }
+
+  function restoreItem(item, now = Date.now()) {
+    const { archivedAt, ...rest } = item;
+    return { ...rest, reviewedAt: now, updatedAt: now };
+  }
+
+  // PURGE never removes the record — see mergeItem's doc comment for why a
+  // tombstone (deletedAt) has to be an ordinary "newest updatedAt wins"
+  // mutation, not a special case, so it merges the same way as any edit.
+  function purgeItem(item, now = Date.now()) {
+    return { ...item, deletedAt: now, updatedAt: now };
+  }
+
+  function addLogEntry(item, text, now = Date.now(), idFn = uid) {
+    const entry = { id: idFn(), ts: now, text };
+    return { ...item, log: [...(item.log || []), entry], updatedAt: now };
   }
 
   // Deterministic blip placement: a golden-angle spiral keyed off the id,
@@ -215,7 +414,14 @@ ${groupsHTML}
     migrate,
     serialize,
     selectVisible,
-    mergeById,
+    stripTombstones,
+    mergeItem,
+    mergeState,
+    pingItem,
+    archiveItem,
+    restoreItem,
+    purgeItem,
+    addLogEntry,
     blipXY,
     escapeHtml,
     buildReportHTML,

@@ -9,7 +9,7 @@
 // Pure domain logic lives in domain.js (loaded as window.WorkRadarDomain),
 // so it can be unit-tested under node:test without a DOM.
 const D = window.WorkRadarDomain;
-const { PC, SC, CX, CY, R, BACKUP_DAYS, uid, fdt, daysSince, isStale, blipXY } = D;
+const { PC, SC, CX, CY, R, BACKUP_DAYS, uid, fdt, daysSince, isStale, blipXY, stripTombstones } = D;
 const HAS_API = typeof window !== 'undefined' && !!window.radarAPI;
 
 /* ---------- Persistence adapter ---------- */
@@ -74,8 +74,18 @@ const Store = {
       }
       return;
     }
-    this.items = D.migrate(Array.isArray(d.items) ? d.items : []);
-    this.arch = D.migrate(Array.isArray(d.arch) ? d.arch : []);
+    // Merge against an empty state so any id that ended up in both items
+    // and arch (possible under the old mergeById import, which this
+    // replaces) collapses to one record instead of showing up twice.
+    const deduped = D.mergeState(
+      {
+        items: D.migrate(Array.isArray(d.items) ? d.items : []),
+        arch: D.migrate(Array.isArray(d.arch) ? d.arch : []),
+      },
+      { items: [], arch: [] }
+    );
+    this.items = deduped.items;
+    this.arch = deduped.arch;
     this.lastExport = d.lastExport || 0;
   },
   serialize() {
@@ -85,7 +95,15 @@ const Store = {
 
 /* ---------- Debounced save ---------- */
 let saveTimer = null;
+// Set when Store.load() fails at boot (see boot() below). Store.items/arch
+// then stay at their empty initial value, so saving would overwrite the
+// user's real data file with nothing; refuse until the app is restarted.
+let loadFailed = false;
 function scheduleSave() {
+  if (loadFailed) {
+    console.error('save skipped: Store.load() failed at boot, refusing to overwrite data file');
+    return;
+  }
   clearTimeout(saveTimer);
   saveTimer = setTimeout(() => Persist.save(Store.serialize()), 120);
 }
@@ -105,14 +123,20 @@ const Actions = {
     Store.items = Store.items.map((i) => (i.id === id ? { ...i, ...v, updatedAt: Date.now() } : i));
     commit();
   },
+  // Every mutation below goes through a pure domain.js function so the
+  // updatedAt bump (and, for purge, the tombstone) is unit-tested rather
+  // than only reachable through the DOM — see the "Item mutations" section
+  // of domain.js.
   ping(id) {
-    Store.items = Store.items.map((i) => (i.id === id ? { ...i, reviewedAt: Date.now() } : i));
+    const now = Date.now();
+    Store.items = Store.items.map((i) => (i.id === id ? D.pingItem(i, now) : i));
     commit();
   },
   archive(id) {
     const it = Store.items.find((i) => i.id === id);
     if (!it) return;
-    Store.arch.unshift({ ...it, archivedAt: Date.now() });
+    const now = Date.now();
+    Store.arch.unshift(D.archiveItem(it, now));
     Store.items = Store.items.filter((i) => i.id !== id);
     if (Store.ui.sel === id) Store.ui.sel = null;
     commit();
@@ -120,22 +144,24 @@ const Actions = {
   restore(id) {
     const it = Store.arch.find((i) => i.id === id);
     if (!it) return;
-    const { archivedAt, ...rest } = it;
-    rest.reviewedAt = Date.now();
-    Store.items.push(rest);
+    const now = Date.now();
+    Store.items.push(D.restoreItem(it, now));
     Store.arch = Store.arch.filter((i) => i.id !== id);
     commit();
   },
+  // PURGE never removes the record — it marks it a tombstone (deletedAt).
+  // Tombstones stay in the data file (so a later merge still sees the
+  // deletion — see domain.js mergeState) but are hidden everywhere in the
+  // UI via D.stripTombstones / D.selectVisible.
   purge(id) {
-    Store.arch = Store.arch.filter((i) => i.id !== id);
+    const now = Date.now();
+    Store.arch = Store.arch.map((i) => (i.id === id ? D.purgeItem(i, now) : i));
     if (Store.ui.sel === id) Store.ui.sel = null;
     commit();
   },
   addLogEntry(id, text) {
-    const entry = { ts: Date.now(), text };
-    Store.items = Store.items.map((i) =>
-      i.id === id ? { ...i, log: [...(i.log || []), entry] } : i
-    );
+    const now = Date.now();
+    Store.items = Store.items.map((i) => (i.id === id ? D.addLogEntry(i, text, now, uid) : i));
     commit();
   },
 
@@ -182,18 +208,32 @@ const Actions = {
       alert('NO CONTACTS FOUND IN FILE.');
       return;
     }
+    // Count live/archived contacts, not tombstones — a file holding only
+    // purged records should say "0 archived", not count them as archived
+    // contacts (see D.stripTombstones).
+    const liveCount = D.stripTombstones(inItems).length;
+    const archCount = D.stripTombstones(inArch).length;
+    const deletions = inItems.length - liveCount + (inArch.length - archCount);
     if (
       !confirm(
         'MERGE ' +
-          inItems.length +
+          liveCount +
           ' live + ' +
-          inArch.length +
-          ' archived contacts?\nMatching IDs are overwritten; the rest added.'
+          archCount +
+          ' archived contacts' +
+          (deletions
+            ? ' (plus ' + deletions + ' deletion' + (deletions !== 1 ? 's' : '') + ')'
+            : '') +
+          '?\nFor matching IDs, the most recently edited version wins.'
       )
     )
       return;
-    Store.items = D.mergeById(Store.items, inItems);
-    Store.arch = D.mergeById(Store.arch, inArch);
+    const merged = D.mergeState(
+      { items: Store.items, arch: Store.arch },
+      { items: inItems, arch: inArch }
+    );
+    Store.items = merged.items;
+    Store.arch = merged.arch;
     Store.ui.sel = null;
     commit();
   },
@@ -202,7 +242,12 @@ const Actions = {
     if (HAS_API) {
       const d = await window.radarAPI.import();
       if (!d) return;
-      this.mergeImported(d);
+      try {
+        this.mergeImported(d);
+      } catch (err) {
+        console.error('import merge failed', err);
+        alert('IMPORT FAILED — the file merged with unexpected data. See console for details.');
+      }
     } else {
       document.getElementById('import-file').click();
     }
@@ -216,14 +261,14 @@ function visibleList() {
 
 /* ---------- Render ---------- */
 function renderStats() {
-  const live = Store.items;
+  const live = stripTombstones(Store.items);
   document.getElementById('s-crit').textContent = live.filter(
     (i) => i.priority === 'critical'
   ).length;
   document.getElementById('s-high').textContent = live.filter((i) => i.priority === 'high').length;
   document.getElementById('s-review').textContent = live.filter(isStale).length;
   document.getElementById('s-live').textContent = live.length;
-  document.getElementById('s-arch').textContent = Store.arch.length;
+  document.getElementById('s-arch').textContent = stripTombstones(Store.arch).length;
   const due = Store.lastExport === 0 ? live.length > 0 : daysSince(Store.lastExport) >= BACKUP_DAYS;
   document.getElementById('backup-warn').style.display = due ? 'inline' : 'none';
 }
@@ -232,7 +277,7 @@ const SVGNS = 'http://www.w3.org/2000/svg';
 function renderBlips() {
   const g = document.getElementById('blips');
   while (g.firstChild) g.removeChild(g.firstChild);
-  Store.items.forEach((item) => {
+  stripTombstones(Store.items).forEach((item) => {
     const pos = blipXY(item),
       col = PC[item.priority],
       isSel = Store.ui.sel === item.id,
@@ -295,7 +340,9 @@ function renderBlips() {
 
 function renderDetail() {
   const dp = document.getElementById('detail-panel');
-  const it = [...Store.items, ...Store.arch].find((i) => i.id === Store.ui.sel);
+  const it = [...stripTombstones(Store.items), ...stripTombstones(Store.arch)].find(
+    (i) => i.id === Store.ui.sel
+  );
   if (!it || Store.ui.showForm) {
     dp.style.display = 'none';
     return;
@@ -354,7 +401,7 @@ function renderDetail() {
   } else {
     mk('RESTORE', '', () => Actions.restore(it.id));
     mk('PURGE', 'danger', () => {
-      if (confirm('PURGE permanently? This cannot be undone.')) Actions.purge(it.id);
+      if (confirm('PURGE? Removes it from this and synced devices.')) Actions.purge(it.id);
     });
   }
   const cb = document.createElement('button');
@@ -613,11 +660,19 @@ function wire() {
     if (!f) return;
     const r = new FileReader();
     r.onload = () => {
+      let parsed;
       try {
-        Actions.mergeImported(JSON.parse(r.result));
+        parsed = JSON.parse(r.result);
       } catch (err) {
         console.error('import parse failed', err);
         alert('INVALID FILE — not valid JSON.');
+        return;
+      }
+      try {
+        Actions.mergeImported(parsed);
+      } catch (err) {
+        console.error('import merge failed', err);
+        alert('IMPORT FAILED — the file merged with unexpected data. See console for details.');
       }
     };
     r.readAsText(f);
@@ -640,7 +695,9 @@ function wire() {
       return;
     }
     if (typing) return;
-    const sel = [...Store.items, ...Store.arch].find((i) => i.id === Store.ui.sel);
+    const sel = [...stripTombstones(Store.items), ...stripTombstones(Store.arch)].find(
+      (i) => i.id === Store.ui.sel
+    );
     if (e.key === 'n' || e.key === 'N') {
       e.preventDefault();
       openAdd();
@@ -713,6 +770,19 @@ function drawTicks() {
   wire();
   startClock();
   startSweep();
-  await Store.load();
+  try {
+    await Store.load();
+  } catch (err) {
+    // Store.items/arch are still their empty initial value here. Without
+    // this guard the error is silently swallowed (nothing logs it, render()
+    // never runs so the UI looks stuck), and the next add/commit would save
+    // that empty Store over the user's data file — a data-loss path.
+    loadFailed = true;
+    console.error('Store.load failed — refusing to save until the app is restarted', err);
+    alert(
+      'LOAD FAILED — your data could not be read. Changes will NOT be saved.\n' +
+        'Restart the app; if this keeps happening, check the console and your data file.'
+    );
+  }
   render();
 })();

@@ -41,7 +41,7 @@ Unlike the old single-file HTML version, this does **not** depend on browser sto
 
 ## Migrating from the browser version
 
-The old `work-radar.html` stored data in browser `localStorage`, which the Electron app can't read. To bring it over: open the old file, hit **EXPORT** to get a JSON backup, then in the Electron app hit **IMPORT** and select it. Merge is non-destructive (matching IDs overwrite, new ones add).
+The old `work-radar.html` stored data in browser `localStorage`, which the Electron app can't read. To bring it over: open the old file, hit **EXPORT** to get a JSON backup, then in the Electron app hit **IMPORT** and select it. Merge is non-destructive: for a matching ID, whichever side was edited more recently wins; everything else is added.
 
 ## Keyboard
 
