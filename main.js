@@ -14,6 +14,7 @@ const { isValidEmail } = require('./sync/validate');
 const { validatePublishableKey } = require('./sync/key-validation');
 const { saveSyncConfigKey } = require('./sync/sync-config-store');
 const { createSaveKeyHandler } = require('./sync/save-key-handler');
+const { disposeFailedAuthAttempt } = require('./sync/dispose-auth-attempt');
 const { createSyncEngine } = require('./sync/sync-engine');
 const { createRealtimeSync } = require('./sync/realtime');
 const { createSyncLifecycle } = require('./sync/sync-lifecycle');
@@ -56,16 +57,14 @@ let authService = null;
 // really do need the engine to be actively cycling (triggerNow() on
 // focus, sync:status).
 let syncEngine = null;
-// Realtime sync trigger (Phase 6 — see sync/realtime.js and
-// docs/supabase-sync-plan.md's Phase 6 notes). Built once alongside
-// syncEngine, sharing the same client, but only ever subscribe()d while
-// signed in, on the same transition that starts the sync engine — see
-// syncLifecycle below.
-let realtimeSync = null;
 // Owns the "start/stop the engine, subscribe/unsubscribe realtime" auth-
 // status transition logic (see sync/sync-lifecycle.js) — extracted out
 // of this file (found in review) so it's unit-testable without
-// Electron. Built once alongside syncEngine/realtimeSync.
+// Electron. Built once alongside syncEngine. The realtime sync trigger
+// itself (Phase 6 — see sync/realtime.js) has no module-level variable
+// of its own: syncLifecycle is the only thing that ever calls
+// subscribe()/unsubscribe() on it, so nothing else in this file needs to
+// hold a reference.
 let syncLifecycle = null;
 
 /* ---------- JSON helpers ---------- */
@@ -328,36 +327,72 @@ function buildRealtimeSync(client, engine) {
   return createRealtimeSync({ client, onChange: () => engine.triggerNow() });
 }
 
-// Builds and wires up authService/syncEngine/realtimeSync/syncLifecycle —
-// shared between normal startup (app.whenReady() below) and the
-// in-process "a key was just saved via the startup prompt" flow (see
-// syncConfig:saveKey below), so both go through exactly one code path
-// rather than two copies that could drift. Idempotent: a second call
-// while authService is already set is a no-op (returns false) — there's
-// nothing left to build, and buildAuthService() would just repeat the
-// same work for nothing. Returns whether it actually (re)built anything.
+// Builds and wires up authService/syncEngine/syncLifecycle — shared
+// between normal startup (app.whenReady() below) and the in-process "a
+// key was just saved via the startup prompt" flow (see syncConfig:saveKey
+// below), so both go through exactly one code path rather than two
+// copies that could drift. Idempotent: a second call while authService
+// is already set is a no-op (returns false) — there's nothing left to
+// build, and buildAuthService() would just repeat the same work for
+// nothing. Returns whether it actually (re)built anything; throws if a
+// build step past buildAuthService() fails (see the try/catch below for
+// what that does before rethrowing) — callers that need this to never
+// throw (app.whenReady() below, sync/save-key-handler.js) wrap this call
+// themselves.
+//
+// The module-level authService/syncEngine/syncLifecycle variables are
+// only assigned right at the end, once every step below has already
+// succeeded — found in review: assigning `authService` first (as this
+// used to) meant a throw from buildSyncEngine()/buildRealtimeSync()/
+// createSyncLifecycle()/authService.onChange() left `authService` set
+// without a matching syncEngine/syncLifecycle, and every other place in
+// this file that treats a non-null `authService` as "sync is fully up"
+// (isAlreadyConfigured() below, the auth:signOut handler, ...) would
+// then act on that half-built state instead of the clean "not
+// configured" one a throw ought to leave behind.
 function initSyncAndAuth() {
   if (authService) return false;
   const built = buildAuthService();
   if (!built) return false;
-  authService = built.service;
-  syncEngine = buildSyncEngine(built.client);
-  realtimeSync = buildRealtimeSync(built.client, syncEngine);
-  syncLifecycle = createSyncLifecycle({ engine: syncEngine, realtime: realtimeSync });
-  authService.onChange((status) => {
-    if (win) win.webContents.send('auth:stateChanged', status);
-    // All the start/stop/subscribe/unsubscribe transition logic lives
-    // in sync/sync-lifecycle.js (see its own doc comment for the
-    // subscribe-after-sign-out race this closes).
-    const wasRunning = syncLifecycle.isRunning();
-    syncLifecycle.handleAuthStatus(status);
-    if (wasRunning && !syncLifecycle.isRunning()) {
-      // Hide the status indicator on sign-out — a signed-out state
-      // shows no sync UI at all, per the plan.
-      if (win) win.webContents.send('sync:stateChanged', { state: null });
-    }
-  });
-  return true;
+  try {
+    const engine = buildSyncEngine(built.client);
+    const realtime = buildRealtimeSync(built.client, engine);
+    const lifecycle = createSyncLifecycle({ engine, realtime });
+    built.service.onChange((status) => {
+      if (win) win.webContents.send('auth:stateChanged', status);
+      // All the start/stop/subscribe/unsubscribe transition logic lives
+      // in sync/sync-lifecycle.js (see its own doc comment for the
+      // subscribe-after-sign-out race this closes).
+      const wasRunning = lifecycle.isRunning();
+      lifecycle.handleAuthStatus(status);
+      if (wasRunning && !lifecycle.isRunning()) {
+        // Hide the status indicator on sign-out — a signed-out state
+        // shows no sync UI at all, per the plan.
+        if (win) win.webContents.send('sync:stateChanged', { state: null });
+      }
+    });
+    authService = built.service;
+    syncEngine = engine;
+    syncLifecycle = lifecycle;
+    return true;
+  } catch (err) {
+    // buildAuthService() already left a *live* auth service (subscribed
+    // to the client's onAuthStateChange) and a supabase-js client behind
+    // by the time any of the steps above can throw — found in review.
+    // Left alone, a later successful retry of initSyncAndAuth() builds a
+    // *second* client/service pair, and two independently
+    // auto-refreshing clients rotating the same refresh token can get
+    // the session revoked outright. sync/dispose-auth-attempt.js tears
+    // this failed attempt down (best-effort, never throws itself) before
+    // the error is rethrown for the caller to handle — it also correctly
+    // waits for the client to actually finish initializing (see its own
+    // doc comment for why that matters) before calling
+    // stopAutoRefresh(), so this fires-and-forgets its returned promise
+    // rather than awaiting it: rethrowing synchronously right away is
+    // what matters here, not waiting for that cleanup to finish first.
+    disposeFailedAuthAttempt({ service: built.service, client: built.client });
+    throw err;
+  }
 }
 
 ipcMain.handle('sync:status', async () => {
