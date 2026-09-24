@@ -90,8 +90,10 @@ detail):
 
 ### Configuring it
 
-Sync is disabled unless the app can find a Supabase URL and publishable key,
-checked in this order:
+The app ships with a **built-in default Supabase project URL** (a public
+identifier, not a secret — see the secrets rule), so sync only needs a
+**publishable key** to turn on. The URL and key are each resolved
+independently, checked in this order:
 
 1. **Environment variables** — `WORK_RADAR_SUPABASE_URL` and
    `WORK_RADAR_SUPABASE_KEY`:
@@ -113,10 +115,35 @@ checked in this order:
    }
    ```
 
-Never commit real values for either — keep them out of version control, per
-the secrets rule (env vars locally, or the `userData` file on a real
-machine). If neither is present, sync and auth are fully disabled and the
-app behaves exactly as it did before sync existed.
+   Either field can be present on its own — a file with just a `url`
+   points sync at a different project without supplying a key yet; a file
+   with just a `publishableKey` uses the built-in default URL.
+
+3. **The startup "add your key" prompt** — if no key is found from either
+   source above, a small overlay asks for one instead of silently staying
+   local forever. Paste a publishable key (`sb_publishable_…`) or a legacy
+   anon JWT and hit **SAVE** to write it into `sync-config.json` and bring
+   sync up immediately, no restart needed; **NOT NOW** keeps the app fully
+   local for this run only — nothing is remembered, so it asks again next
+   launch.
+
+**Every key, from every source above, is validated the same way** —
+whether it's typed into the prompt, dropped in via `sync-config.json`, or
+set as `WORK_RADAR_SUPABASE_KEY` — before it's ever used. Anything that
+looks like a secret or service key (`sb_secret_…` anywhere in the value, or
+a JWT whose role is `service_role`) is rejected with a clear error and
+never written to disk or used to configure sync, since only the
+publishable key is meant to leave RLS as the sole thing protecting your
+data (see the sign-in flow doc for why). A rejected key is treated exactly
+like no key at all — including one set via an env var, so a typo'd or
+accidentally-secret `WORK_RADAR_SUPABASE_KEY` doesn't silently win over a
+good key already saved in `sync-config.json`.
+
+Never commit real values for either the URL override or the key — keep them
+out of version control, per the secrets rule (env vars locally, or the
+`userData` file on a real machine). Setting both env vars skips the startup
+prompt entirely. If no key is ever supplied, the app just keeps prompting
+(and staying local) on every launch, exactly as it did before sync existed.
 
 ### Signing in
 

@@ -20,6 +20,17 @@ contextBridge.exposeInMainWorld('radarAPI', {
   authSignOut: () => ipcRenderer.invoke('auth:signOut'),
   onAuthStateChanged: (cb) => ipcRenderer.on('auth:stateChanged', (_e, status) => cb(status)),
 
+  // Startup "add your key" prompt (see docs/supabase-sync-plan.md's notes
+  // on the built-in default project URL + first-run publishable-key
+  // prompt). needsKey() reports whether main found no publishable key at
+  // startup from any source — always false when env vars fully configure
+  // sync. saveKey() is the only way the renderer can ever write to
+  // sync-config.json: the key is validated in main (sync/key-validation.js)
+  // before anything is written or a service built, and main never sends
+  // the key itself back to the renderer.
+  syncConfigNeedsKey: () => ipcRenderer.invoke('syncConfig:needsKey'),
+  syncConfigSaveKey: (key) => ipcRenderer.invoke('syncConfig:saveKey', key),
+
   // Sync engine (Phases 4-5, see docs/supabase-sync-plan.md). Mostly
   // push-only from main, but syncStatus() lets the renderer ask for the
   // current status once on load/reload — the push alone can otherwise

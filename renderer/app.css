@@ -208,6 +208,64 @@ select {
   color: #f44336;
 }
 
+/* Startup "add your key" prompt (see docs/supabase-sync-plan.md's notes
+   on the built-in default project URL + first-run publishable-key
+   prompt). Shown before sync is "configured" at all — there's no
+   #auth-panel to live inside yet at that point — so this is a
+   full-viewport overlay rather than a header element. Same
+   [hidden]-override need as #auth-panel/#auth-form above: the bare rule
+   below sets display:flex, which beats the browser's built-in
+   `[hidden] { display: none }` (see that rule's own comment), so
+   #sync-key-overlay[hidden] has to say display:none explicitly too —
+   covered by test/renderer-css.test.js. */
+#sync-key-overlay {
+  position: fixed;
+  inset: 0;
+  background: #010805cc;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 50;
+}
+#sync-key-overlay[hidden] {
+  display: none;
+}
+#sync-key-panel {
+  background: #020e07;
+  border: 1px solid #1a5c2c;
+  padding: 16px 18px;
+  width: 320px;
+  max-width: calc(100vw - 32px);
+}
+#sync-key-title {
+  font-size: 10px;
+  letter-spacing: 2px;
+  color: #69f0ae;
+  margin-bottom: 8px;
+}
+#sync-key-copy {
+  font-size: 8px;
+  line-height: 1.6;
+  color: #2e7d4a;
+  letter-spacing: 0.5px;
+  margin-bottom: 10px;
+}
+#sync-key-form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+#sync-key-label {
+  font-size: 7px;
+  letter-spacing: 1px;
+  color: #1a4d2e;
+}
+#sync-key-actions {
+  display: flex;
+  gap: 6px;
+  justify-content: flex-end;
+}
+
 #toolbar {
   border-bottom: 1px solid #1a5c2c;
   background: #020e07;

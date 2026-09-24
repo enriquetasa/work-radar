@@ -11,6 +11,9 @@ const { createAuthClient } = require('./sync/auth-client');
 const { createAuthService } = require('./sync/auth-service');
 const { waitForCallback, REDIRECT_TO } = require('./sync/callback-server');
 const { isValidEmail } = require('./sync/validate');
+const { validatePublishableKey } = require('./sync/key-validation');
+const { saveSyncConfigKey } = require('./sync/sync-config-store');
+const { createSaveKeyHandler } = require('./sync/save-key-handler');
 const { createSyncEngine } = require('./sync/sync-engine');
 const { createRealtimeSync } = require('./sync/realtime');
 const { createSyncLifecycle } = require('./sync/sync-lifecycle');
@@ -325,6 +328,38 @@ function buildRealtimeSync(client, engine) {
   return createRealtimeSync({ client, onChange: () => engine.triggerNow() });
 }
 
+// Builds and wires up authService/syncEngine/realtimeSync/syncLifecycle —
+// shared between normal startup (app.whenReady() below) and the
+// in-process "a key was just saved via the startup prompt" flow (see
+// syncConfig:saveKey below), so both go through exactly one code path
+// rather than two copies that could drift. Idempotent: a second call
+// while authService is already set is a no-op (returns false) — there's
+// nothing left to build, and buildAuthService() would just repeat the
+// same work for nothing. Returns whether it actually (re)built anything.
+function initSyncAndAuth() {
+  if (authService) return false;
+  const built = buildAuthService();
+  if (!built) return false;
+  authService = built.service;
+  syncEngine = buildSyncEngine(built.client);
+  realtimeSync = buildRealtimeSync(built.client, syncEngine);
+  syncLifecycle = createSyncLifecycle({ engine: syncEngine, realtime: realtimeSync });
+  authService.onChange((status) => {
+    if (win) win.webContents.send('auth:stateChanged', status);
+    // All the start/stop/subscribe/unsubscribe transition logic lives
+    // in sync/sync-lifecycle.js (see its own doc comment for the
+    // subscribe-after-sign-out race this closes).
+    const wasRunning = syncLifecycle.isRunning();
+    syncLifecycle.handleAuthStatus(status);
+    if (wasRunning && !syncLifecycle.isRunning()) {
+      // Hide the status indicator on sign-out — a signed-out state
+      // shows no sync UI at all, per the plan.
+      if (win) win.webContents.send('sync:stateChanged', { state: null });
+    }
+  });
+  return true;
+}
+
 ipcMain.handle('sync:status', async () => {
   // The only way the renderer can learn the current sync status other
   // than waiting for the next 'sync:stateChanged' push — needed because
@@ -368,6 +403,38 @@ ipcMain.handle('auth:signOut', async () => {
     return { ok: false, error: err.message };
   }
 });
+
+/* ---------- Startup "add your key" prompt ----------
+   Shown by the renderer only when this reports true — which folds in
+   the "env vars fully configure it" case for free, since
+   resolveSyncConfig() only reports `configured: false` when no key was
+   found from any source (see sync/config.js's own doc comment). */
+ipcMain.handle('syncConfig:needsKey', async () => {
+  const syncConfig = resolveSyncConfig({ userDataDir: app.getPath('userData') });
+  return !syncConfig.configured;
+});
+
+// The validate -> skip-if-configured -> save -> init sequencing (plus the
+// concurrency guard that keeps two near-simultaneous saveKey calls from
+// each running that whole sequence independently) lives in
+// sync/save-key-handler.js, a pure module unit-tested with fakes — see
+// its own doc comment and test/sync-save-key-handler.test.js. Wraps
+// initSyncAndAuth so a successful in-process init also rebuilds the
+// Radar menu (Sign Out now applies) — the pure module itself has no
+// notion of the menu.
+const saveKeyHandler = createSaveKeyHandler({
+  validateKey: validatePublishableKey,
+  isAlreadyConfigured: () => !!authService,
+  saveKey: (key) =>
+    saveSyncConfigKey({ userDataDir: app.getPath('userData'), publishableKey: key }),
+  initSyncAndAuth: () => {
+    const started = initSyncAndAuth();
+    if (started) buildMenu();
+    return started;
+  },
+});
+
+ipcMain.handle('syncConfig:saveKey', async (_e, rawKey) => saveKeyHandler.handleSaveKey(rawKey));
 
 /* ---------- Menu ---------- */
 function buildMenu() {
@@ -499,29 +566,7 @@ app.whenReady().then(async () => {
   }
 
   await dailyBackup();
-  const built = buildAuthService();
-  if (built) {
-    authService = built.service;
-    syncEngine = buildSyncEngine(built.client);
-    realtimeSync = buildRealtimeSync(built.client, syncEngine);
-    syncLifecycle = createSyncLifecycle({ engine: syncEngine, realtime: realtimeSync });
-    authService.onChange((status) => {
-      if (win) win.webContents.send('auth:stateChanged', status);
-      // All the start/stop/subscribe/unsubscribe transition logic lives
-      // in sync/sync-lifecycle.js now (found in review — see its own
-      // doc comment for the subscribe-after-sign-out race this closes).
-      // Other handlers in this file (sync:status, the focus trigger
-      // below) read `syncLifecycle.isRunning()` directly rather than a
-      // second, hand-synced module-level flag (found in review).
-      const wasRunning = syncLifecycle.isRunning();
-      syncLifecycle.handleAuthStatus(status);
-      if (wasRunning && !syncLifecycle.isRunning()) {
-        // Hide the status indicator on sign-out — a signed-out state
-        // shows no sync UI at all, per the plan.
-        if (win) win.webContents.send('sync:stateChanged', { state: null });
-      }
-    });
-  }
+  initSyncAndAuth();
   buildMenu();
   await createWindow();
 

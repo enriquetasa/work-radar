@@ -1528,6 +1528,199 @@ data needing a security/IT sign-off before real use (already tracked below
 under "Open items") is called out in the README too, next to the sync
 section, so it isn't only visible to someone reading this plan doc.
 
+## Phase 8 notes (explicit userData pin, built-in project, startup key prompt)
+
+Two independent changes, both aimed at making sync easier to actually turn
+on without touching this app's own configuration files by hand.
+
+- **userData folder pinned explicitly to `<appData>/work-radar`.** This
+  was initially built as a migration away from a supposed old
+  `<appData>/Work Radar` (with a space) default, on the assumption that
+  electron-builder's packaged app inherited `build.productName` as a
+  top-level `productName`/`name`. That assumption was wrong: electron-builder
+  26's packaged `package.json` keeps `name: "work-radar"` and drops the
+  `build` block entirely, so `app.name` — and Electron's own default
+  `userData` path — is already `<appData>/work-radar` in both a plain
+  `electron .` dev run and a packaged build. There was never a space-
+  containing folder to migrate away from, so the migration module
+  (`userdata-migration.js`) and its test were removed. What's left is a
+  single explicit `app.setPath('userData', path.join(app.getPath('appData'),
+'work-radar'))` at the very top of `main.js` — a no-op today, but it means
+  a future top-level `productName` (or any other change to how Electron
+  derives `app.name`) can never silently move users' data to a different
+  folder. Startup logs the resolved path (`log.info('userData path
+resolved', { userData })`) so it's visible either way.
+
+- **A built-in default Supabase project URL.** `sync/config.js` gained
+  `DEFAULT_SUPABASE_URL` (a public project URL — non-secret config the
+  secrets rule allows to commit) used whenever nothing more specific
+  overrides it. `resolveSyncConfig()` now resolves the URL and the
+  publishable key **independently**, each checked env var → `sync-config.json`
+  field → (URL only) the built-in default — rather than the old
+  all-or-nothing "both env vars, or both file fields, or fully disabled".
+  This is what makes the key prompt below possible: a file (or no file at
+  all) with no `publishableKey` yet is now a normal, expected shape
+  (`configured: false`, still carrying the resolved `url`) rather than an
+  error state that used to log a warning every startup. Only a genuine read
+  problem (corrupt JSON, a permissions error) still warns; a file that's
+  simply incomplete does not. Both env vars set together still short-circuits
+  before the file is ever read (unchanged from Phase 3 — env-configured runs,
+  e.g. CI or a container without a writable `userData`, never depend on that
+  file existing), which is also what makes "env vars skip the prompt
+  entirely" true without any extra code in the prompt path itself —
+  `syncConfig:needsKey` is just `!resolveSyncConfig(...).configured`.
+  Tests first, rewriting `test/sync-config.test.js`'s expectations for the
+  new per-field resolution and the now-normal "url but no key" shape.
+
+- **The startup "add your key" prompt.** When `syncConfig:needsKey` (main)
+  reports true, the renderer shows a full-viewport overlay (`#sync-key-overlay`
+  in `index.html`, styled in `app.css` to match the auth panel's look —
+  including the same `[hidden]`-beats-`display:flex` override the auth panel
+  needed, re-verified here with its own `test/renderer-css.test.js` case) with
+  a text input, **SAVE** and **NOT NOW**. **NOT NOW** just hides the overlay
+  in memory for this run — nothing is persisted, so it asks again next
+  launch, per the task. **SAVE** sends the trimmed key to
+  `syncConfig:saveKey` (preload's only way to ever reach `sync-config.json`);
+  main validates it with `sync/key-validation.js` before anything reaches
+  disk (see the review-fixes section below for exactly what it accepts and
+  rejects). A valid key is persisted by `sync/sync-config-store.js`'s
+  `saveSyncConfigKey()`, which reuses `sync/atomic-json-file.js`'s existing
+  atomic read/write rather than duplicating that pattern, and preserves
+  whatever `url` was already in the file (never writes the built-in default
+  itself — that's applied at _read_ time by `resolveSyncConfig()`, never
+  persisted). **No app restart:** `main.js`'s old `app.whenReady()` block
+  that built `authService`/`syncEngine`/`realtimeSync`/`syncLifecycle` and
+  wired `authService.onChange` was extracted into one function,
+  `initSyncAndAuth()` — idempotent (a no-op once `authService` is already
+  set) — called both from normal startup and from the save-key path (see
+  below), so there is exactly one code path instead of two copies that
+  could drift. The key itself is never sent back to the renderer and never
+  logged anywhere.
+
+### Review fixes (Phase 8)
+
+A review of the Phase 8 work above found a wrong premise and several real
+bugs, fixed here.
+
+- **The userData migration's premise was wrong — removed entirely.** It
+  assumed a packaged electron-builder app ended up with a top-level
+  `productName`/`name` of `"Work Radar"` (a space) in its own
+  `package.json`, taken from `build.productName`. Checking
+  electron-builder 26's actual packager output shows the packaged
+  `package.json` keeps `name: "work-radar"` and drops the `build` block
+  entirely — there is no top-level `productName`. `app.name`, and so
+  Electron's default `userData` path, was therefore already
+  `<appData>/work-radar` in both a dev run and a packaged build; the
+  README already documented these exact paths before this phase touched
+  anything. `userdata-migration.js` and its test were deleted along with
+  every mention of a migration. What replaced it: a single explicit
+  `app.setPath('userData', path.join(app.getPath('appData'),
+'work-radar'))` at the top of `main.js`, with a `log.info` of the
+  resolved path right after — a no-op today, kept only so a _future_
+  top-level `productName` can never silently move users' data.
+
+- **Key validation could be bypassed several ways** (found in review,
+  against `sync/key-validation.js`'s original prefix/suffix checks):
+  `'sb_publishable_abc\nsb_secret_def'`, `'sb_publishable_abc
+sb_secret_def'`, a bare `'sb_publishable_'` with nothing after the
+  prefix, an otherwise-valid anon JWT with `'\nsb_secret_zzz'` appended,
+  and a JWT-shaped string with empty header/signature segments
+  (`'a.<payload>.'`) were all accepted. Fixed by anchoring both accepted
+  shapes to the _whole_ string — `/^sb_publishable_[A-Za-z0-9_-]+$/` and,
+  for a JWT, `/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/` (exactly
+  three non-empty base64url segments) — and by checking for
+  `'sb_secret_'` as a substring _anywhere_ in the input rather than only
+  as a prefix, ahead of every other check. A 2 KB length cap was also
+  added, purely to reject pathological input before it's ever written to
+  disk or repeatedly re-parsed as JSON. Each bypass above is now a
+  dedicated regression test in `test/sync-key-validation.test.js`,
+  written failing first.
+
+- **Keys from env vars and a hand-edited `sync-config.json` were never
+  validated**, only a key typed into the prompt was. `resolveSyncConfig()`
+  now runs every candidate key — env or file — through
+  `validatePublishableKey()` before using it; a rejected key is logged
+  (the rejection reason only, never the key) and treated as if it were
+  never supplied at all, falling through to the next source instead of
+  winning outright. This matters beyond just "don't use a bad key": before
+  this fix, an env-supplied key that failed validation would still "win"
+  over a valid key already saved in `sync-config.json` (a non-empty string
+  beats an empty one in `envKey || fileKey`), which would have trapped a
+  user in an unfixable prompt loop — saving a good key through the prompt
+  would never actually take effect on the next launch, since the broken
+  env var still resolved first. Excluding a rejected candidate from
+  consideration entirely closes that loop: the prompt keeps showing only
+  until a key that actually validates is available from _some_ source.
+
+- **A bare JSON `null` (or any other non-object) in `sync-config.json`
+  crashed `resolveSyncConfig()`** — `parsed.url` on a `null` `parsed`
+  throws a `TypeError` that escaped the function entirely, and at startup
+  that meant no window ever opened. `readSyncConfigFile()` now checks
+  `typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)`
+  before touching any property, logging a warning and degrading to "no
+  url, no key" otherwise — the same tolerant treatment corrupt JSON
+  already got.
+
+- **Double save / double init**, found in review as a chain of three
+  related bugs:
+  1. `Auth.init()` re-ran its _entire_ body — including both
+     `addEventListener` calls — every time it was called, but it's
+     deliberately called a second time by `SyncConfigPrompt.save()` after
+     a successful save (so the sign-in panel can appear without an app
+     restart). Two `#auth-form` submit listeners on the same form meant
+     one click fired `Auth.submit()` twice, and the second `authSignIn()`
+     call failed with "a sign-in is already pending". Fixed with an
+     `_listenersBound` flag: `init()` still refreshes the panel and
+     re-renders on every call, but only registers `onAuthStateChanged` and
+     the submit listener the first time it ever gets past the
+     "configured" check.
+  2. Nothing disabled the prompt's **SAVE** button while a save was in
+     flight, so a fast double-click (or the listener bug above, before it
+     was fixed) could fire two `syncConfig:saveKey` IPC calls. Fixed in
+     `renderer/app.js`'s `SyncConfigPrompt.save()`: the button is disabled
+     for the duration of the call, in a `finally` block, and a second call
+     arriving anyway while it's already disabled is a no-op.
+  3. Even with both renderer fixes above, main.js's own handler had no
+     guard of its own: two overlapping `syncConfig:saveKey` calls could
+     both observe `authService` as still `null` before either had
+     finished `await`ing its own save, so both went on to call
+     `initSyncAndAuth()` — the second one running against an `authService`
+     the first had _just_ set, logging a false "auth could not be
+     initialized" for a save that had actually succeeded. The
+     validate → skip-if-configured → save → init sequencing was extracted
+     out of the inline IPC handler into `sync/save-key-handler.js`'s
+     `createSaveKeyHandler()` — a pure, dependency-injected module in the
+     same style as `sync/sync-lifecycle.js` — which keeps a single
+     in-flight run's promise and hands it to any call that arrives while
+     it's still settling, so the whole sequence only ever executes once
+     per overlapping burst of calls, however many renderer-side bugs (present
+     or future) might otherwise cause one. Unit-tested with fakes,
+     including a test that starts two overlapping calls and asserts
+     `saveKey`/`initSyncAndAuth` each ran exactly once.
+
+- **A successful save whose `initSyncAndAuth()` returns `false`** (e.g. no
+  OS secret store for `safeStorage`) used to still report `{ ok: true }` to
+  the renderer — the key genuinely was saved, but sync didn't actually come
+  up, and the renderer had no way to tell the difference.
+  `createSaveKeyHandler()` now returns `{ ok: false, error: "Key saved, but
+this system has no secure storage for the sign-in session, so sync can't
+start." }` for that case specifically, distinct from both the ordinary
+  success path and a save that failed outright.
+
+- **Overlay accessibility.** `#sync-key-overlay` gained `role="dialog"`,
+  `aria-modal="true"` and `aria-labelledby="sync-key-title"`; the input
+  gained a real `<label for="sync-key-input">`, replacing reliance on the
+  placeholder alone; `#sync-key-error` gained `role="alert"`. Focus moves
+  to the input when the overlay opens and back to it after a save error.
+  `Escape` now acts as "Not now" while the overlay is open. The
+  document-level `keydown` handler that implements the `n`/`/`/`e`/`p`/`a`
+  shortcuts checks `SyncConfigPrompt.isOpen()` first and returns early for
+  every key except `Escape` while it's open — found in review: those
+  shortcuts are gated on `document.activeElement` not being an
+  INPUT/TEXTAREA/SELECT, but the overlay's **SAVE**/**NOT NOW** buttons are
+  neither, so tabbing from the input to a button (or just clicking one) let
+  a shortcut key reach the app behind the overlay even while it was open.
+
 ## Open items
 
 - Work data (people and projects at Octopus) would live in a personal Supabase

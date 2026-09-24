@@ -244,6 +244,36 @@
         </div>
       </div>
     </div>
+
+    <div
+      id="sync-key-overlay"
+      hidden
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="sync-key-title"
+    >
+      <div id="sync-key-panel">
+        <div id="sync-key-title">◈ ENABLE SYNC</div>
+        <p id="sync-key-copy">
+          Add a Supabase publishable key to sync this data across machines. Skip for now and the app
+          stays fully local — you'll be asked again next launch.
+        </p>
+        <form id="sync-key-form">
+          <label id="sync-key-label" for="sync-key-input">PUBLISHABLE KEY</label>
+          <input
+            id="sync-key-input"
+            type="text"
+            placeholder="sb_publishable_… or anon JWT"
+            autocomplete="off"
+          />
+          <span id="sync-key-error" class="auth-status auth-error" role="alert" hidden></span>
+          <div id="sync-key-actions">
+            <button type="button" id="sync-key-skip" class="form-act">NOT NOW</button>
+            <button type="submit" id="sync-key-save" class="form-act primary">SAVE</button>
+          </div>
+        </form>
+      </div>
+    </div>
     <script src="domain.js"></script>
     <script src="auth-view.js"></script>
     <script src="sync-view.js"></script>

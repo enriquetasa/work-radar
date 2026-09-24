@@ -271,6 +271,18 @@ const Actions = {
    Radar menu, not here (main.js only adds that menu item when sync is
    configured). */
 const Auth = {
+  // Set once the 'auth:stateChanged' listener and the #auth-form submit
+  // listener have actually been registered — found in review: init() is
+  // deliberately called a second time by SyncConfigPrompt.save() (see
+  // below) so a session that started out unconfigured can show the
+  // sign-in panel without an app restart, but init() used to re-run its
+  // whole body including both addEventListener calls on every call that
+  // got past the "configured" check. Two submit listeners on the same
+  // form meant one click fired Auth.submit() twice — the second
+  // authSignIn() call then failed with "a sign-in is already pending".
+  // This flag makes registering the listeners a one-time effect no
+  // matter how many times init() itself runs.
+  _listenersBound: false,
   async init() {
     if (!HAS_API || !window.radarAPI.authStatus) return;
     let status;
@@ -283,6 +295,8 @@ const Auth = {
     if (!status || !status.configured) return; // sync not configured — leave the panel hidden
     document.getElementById('auth-panel').hidden = false;
     this.render(status);
+    if (this._listenersBound) return;
+    this._listenersBound = true;
     if (window.radarAPI.onAuthStateChanged) {
       window.radarAPI.onAuthStateChanged((s) => this.render(s));
     }
@@ -333,6 +347,86 @@ const Auth = {
     } catch (err) {
       console.error('sign-in failed', err);
       this.showError('SIGN-IN FAILED');
+    }
+  },
+};
+
+/* ---------- Sync-config key prompt (see docs/supabase-sync-plan.md's
+   notes on the built-in default project URL + first-run key prompt)
+   ----------
+   Shown once at startup, only when main reports no publishable key was
+   found from any source — syncConfigNeedsKey() already folds in "env
+   vars fully configure it", so this never shows in that case. Saving
+   hands the trimmed key to main for validation (sync/key-validation.js)
+   and persistence; main never echoes the key back, and this never logs
+   it either. "NOT NOW" just hides the overlay for this run — nothing is
+   persisted, so the prompt returns next launch. On a successful save,
+   Auth.init() is re-run: its own early return on `!status.configured`
+   is exactly why it did nothing the first time boot() called it, so
+   this is the only place that ever lets it proceed for a session that
+   started out unconfigured — no app restart needed. */
+const SyncConfigPrompt = {
+  isOpen() {
+    const overlay = document.getElementById('sync-key-overlay');
+    return !!overlay && !overlay.hidden;
+  },
+  async init() {
+    if (!HAS_API || !window.radarAPI.syncConfigNeedsKey) return;
+    let needsKey = false;
+    try {
+      needsKey = await window.radarAPI.syncConfigNeedsKey();
+    } catch (err) {
+      console.error('syncConfigNeedsKey failed', err);
+      return;
+    }
+    if (!needsKey) return;
+    document.getElementById('sync-key-overlay').hidden = false;
+    document.getElementById('sync-key-form').addEventListener('submit', (e) => {
+      e.preventDefault();
+      this.save();
+    });
+    document.getElementById('sync-key-skip').addEventListener('click', () => this.dismiss());
+    document.getElementById('sync-key-input').focus();
+  },
+  dismiss() {
+    document.getElementById('sync-key-overlay').hidden = true;
+  },
+  showError(message) {
+    const err = document.getElementById('sync-key-error');
+    err.textContent = message;
+    err.hidden = false;
+    // Send focus back to the input so a screen-reader user (and anyone
+    // tabbing through) lands right back where they need to fix it,
+    // rather than wherever focus happened to be (e.g. the disabled Save
+    // button — see save() below).
+    document.getElementById('sync-key-input').focus();
+  },
+  async save() {
+    const input = document.getElementById('sync-key-input');
+    const key = input.value.trim();
+    if (!key) {
+      input.focus();
+      return;
+    }
+    const saveBtn = document.getElementById('sync-key-save');
+    if (saveBtn.disabled) return; // a save is already in flight — ignore a duplicate submit
+    saveBtn.disabled = true;
+    document.getElementById('sync-key-error').hidden = true;
+    try {
+      const res = await window.radarAPI.syncConfigSaveKey(key);
+      if (!res || !res.ok) {
+        console.error('sync-config key save failed', res && res.error);
+        this.showError((res && res.error) || 'COULD NOT SAVE KEY');
+        return;
+      }
+      input.value = '';
+      this.dismiss();
+      await Auth.init();
+    } catch (err) {
+      console.error('syncConfigSaveKey failed', err);
+      this.showError('COULD NOT SAVE KEY');
+    } finally {
+      saveBtn.disabled = false;
     }
   },
 };
@@ -833,6 +927,20 @@ function wire() {
   });
 
   document.addEventListener('keydown', (e) => {
+    // The startup key-prompt overlay covers the whole viewport, but a
+    // keydown on `document` fires regardless of what's visually on top —
+    // found in review: tabbing from the overlay's input to its Save/Not
+    // Now buttons (neither is an INPUT/TEXTAREA/SELECT, so the `typing`
+    // guard below didn't catch it) let 'n'/'e'/'p'/'a'/'/' reach the app
+    // behind the overlay while it was still open. Escape here also
+    // doubles as "Not now", consistent with the button.
+    if (SyncConfigPrompt.isOpen()) {
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        SyncConfigPrompt.dismiss();
+      }
+      return;
+    }
     const typing = ['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement.tagName);
     if (e.key === 'Escape') {
       if (Store.ui.showForm) closeForm();
@@ -925,6 +1033,7 @@ function drawTicks() {
   startSweep();
   Auth.init().catch((err) => console.error('Auth.init failed', err));
   Sync.init();
+  SyncConfigPrompt.init().catch((err) => console.error('SyncConfigPrompt.init failed', err));
   try {
     await Store.load();
   } catch (err) {

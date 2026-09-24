@@ -33,3 +33,15 @@ test('app.css overrides [hidden] back to display:none for #auth-panel and #auth-
       'which beats the browser default [hidden] { display:none }'
   );
 });
+
+test('app.css overrides [hidden] back to display:none for #sync-key-overlay', () => {
+  // Same class of bug as #auth-panel/#auth-form above: #sync-key-overlay's
+  // bare rule sets display:flex (to center its card), which beats the
+  // browser's built-in `[hidden] { display: none }` unless overridden.
+  assert.match(
+    css,
+    /#sync-key-overlay\[hidden\][\s\S]{0,80}display:\s*none/,
+    '#sync-key-overlay[hidden] must resolve to display:none — its bare rule sets display:flex, ' +
+      'which beats the browser default [hidden] { display:none }'
+  );
+});
