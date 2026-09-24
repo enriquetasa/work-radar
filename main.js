@@ -18,15 +18,9 @@ const { disposeFailedAuthAttempt } = require('./sync/dispose-auth-attempt');
 const { createSyncEngine } = require('./sync/sync-engine');
 const { createRealtimeSync } = require('./sync/realtime');
 const { createSyncLifecycle } = require('./sync/sync-lifecycle');
+const { readJsonFile, writeJsonFileAtomic } = require('./sync/atomic-json-file');
 
-// Pins the userData folder explicitly. This already matches Electron's own
-// default in both a plain `electron .` dev run and a packaged build (
-// electron-builder 26 keeps `name: "work-radar"` in the packaged app's own
-// package.json, with no top-level `productName` — the `build` block is
-// stripped), so this is a no-op today — but setting it explicitly means a
-// future top-level `productName` (or any other change to how Electron
-// derives app.name) can never silently move users' data to a different
-// folder.
+// Keep the data directory stable if the Electron product name changes.
 app.setPath('userData', path.join(app.getPath('appData'), 'work-radar'));
 log.info('userData path resolved', { userData: app.getPath('userData') });
 
@@ -38,61 +32,14 @@ const ICON_PNG = path.join(__dirname, 'build', 'icon.png');
 const MAX_BACKUPS = 30;
 
 let win = null;
-// Set during startup if (and only if) sync is configured AND the
-// platform's secret store (Electron safeStorage) is actually available —
-// see buildAuthService() below. Every auth IPC handler treats a null
-// authService as "sync disabled", which is exactly how the app behaved
-// before Phase 3 (see docs/supabase-sync-plan.md).
 let authService = null;
-// The sync engine (Phases 4-5 — push/pull/merge, see sync/sync-engine.js).
-// Built once alongside authService, sharing its supabase-js client, but
-// only ever start()ed while a session is actually signed in — see
-// authService.onChange() below. data:save (below) routes through the
-// engine's save-race-safe recordLocalSave whenever `syncEngine` exists at
-// all, not only while it's actively running — the merge needs no signed-in
-// user, only recordLocalSave's own outbox bookkeeping does, and that
-// already degrades gracefully without one. `syncLifecycle.isRunning()` is
-// read directly (no separate module-level flag — found in review: two
-// copies of "is sync running" can silently drift) to gate calls that
-// really do need the engine to be actively cycling (triggerNow() on
-// focus, sync:status).
 let syncEngine = null;
-// Owns the "start/stop the engine, subscribe/unsubscribe realtime" auth-
-// status transition logic (see sync/sync-lifecycle.js) — extracted out
-// of this file (found in review) so it's unit-testable without
-// Electron. Built once alongside syncEngine. The realtime sync trigger
-// itself (Phase 6 — see sync/realtime.js) has no module-level variable
-// of its own: syncLifecycle is the only thing that ever calls
-// subscribe()/unsubscribe() on it, so nothing else in this file needs to
-// hold a reference.
 let syncLifecycle = null;
 
-/* ---------- JSON helpers ---------- */
-async function readJSON(file) {
-  try {
-    return JSON.parse(await fsp.readFile(file, 'utf8'));
-  } catch (err) {
-    // A missing file is the normal first-run case; anything else is a real
-    // problem worth surfacing (corrupt JSON, permissions, etc.).
-    if (err.code === 'ENOENT') {
-      log.debug('file not found, treating as empty', { file });
-    } else {
-      log.warn('failed to read JSON file', { file, err });
-    }
-    return null;
-  }
-}
+const readJSON = (file) => readJsonFile(file, { log });
+const atomicWrite = (file, data) => writeJsonFileAtomic(file, data, { log });
 
-// Write to a temp file then rename — rename is atomic, so a crash mid-write
-// can never leave a half-written (corrupt) data file.
-async function atomicWrite(file, obj) {
-  const tmp = file + '.tmp';
-  await fsp.writeFile(tmp, JSON.stringify(obj, null, 2), 'utf8');
-  await fsp.rename(tmp, file);
-}
-
-// One snapshot per calendar day, pruned to the last MAX_BACKUPS. Cheap, and
-// gives a rolling history independent of the user's manual exports.
+// Backups are best-effort and must never block startup.
 async function dailyBackup() {
   if (!fs.existsSync(DATA_FILE())) return;
   try {
@@ -112,12 +59,10 @@ async function dailyBackup() {
       log.debug('pruned old backup', { file: f });
     }
   } catch (err) {
-    // Backups are best-effort — log loudly but never block startup.
     log.error('daily backup failed', { err });
   }
 }
 
-/* ---------- Window state persistence ---------- */
 async function loadWinState() {
   const s = await readJSON(WINSTATE());
   return s && s.width ? s : { width: 1100, height: 720 };
@@ -131,8 +76,7 @@ async function saveWinState() {
   }
 }
 
-/* ---------- IPC: all disk IO lives in the main process ---------- */
-ipcMain.handle('data:load', async () => await readJSON(DATA_FILE()));
+ipcMain.handle('data:load', () => readJSON(DATA_FILE()));
 
 ipcMain.handle('data:save', async (_e, data) => {
   if (!data || typeof data !== 'object') {
@@ -140,25 +84,8 @@ ipcMain.handle('data:save', async (_e, data) => {
     return { ok: false, error: 'invalid payload' };
   }
   try {
+    // The engine serializes saves with any pull already in flight.
     if (syncEngine) {
-      // recordLocalSave merges this payload with what's currently on
-      // disk instead of overwriting it outright — see
-      // docs/supabase-sync-plan.md's Phase 4-5 notes ("the save race") for
-      // why: a save the renderer queued just before a background pull
-      // wrote in a remote change must not stomp on that change. It also
-      // does this phase's outbox diffing (never trusts the renderer to
-      // report what changed) and schedules a debounced push.
-      //
-      // Gated on `syncEngine` existing at all, not on whether it's
-      // running (found in review): the merge itself needs no signed-in
-      // user —
-      // only recordLocalSave's own outbox bookkeeping does, and that
-      // already skips gracefully when there isn't one — so routing
-      // through it whenever the engine exists keeps every write to this
-      // file behind the same mutex even right at sign-out, when a pull
-      // merge started just before stop() ran can still be finishing its
-      // own write. Falling back to a bare atomicWrite in that narrow
-      // window would let it race a plain save and silently drop one.
       await syncEngine.recordLocalSave(data);
     } else {
       await atomicWrite(DATA_FILE(), data);
@@ -194,7 +121,7 @@ ipcMain.handle('data:import', async () => {
     filters: [{ name: 'JSON', extensions: ['json'] }],
   });
   if (canceled || !filePaths[0]) return null;
-  return await readJSON(filePaths[0]);
+  return readJSON(filePaths[0]);
 });
 
 ipcMain.handle('data:exportPDF', async (_e, html) => {
@@ -237,16 +164,8 @@ ipcMain.handle('data:revealBackups', async () => {
   }
 });
 
-/* ---------- Sync/auth (see docs/supabase-sync-plan.md → "Sign-in flow") ---------- */
 const SESSION_FILE = () => path.join(app.getPath('userData'), 'sync-session.enc');
 
-// Builds the auth service (and returns the supabase-js client it uses,
-// so the sync engine below can share the same authenticated client
-// rather than creating a second one), or returns null if sync isn't
-// usable — either because it's not configured at all (no env vars /
-// sync-config.json), or because this OS has no secret store for
-// Electron's safeStorage to use. Never throws: any failure here just
-// means the app runs fully local, as it always did.
 function buildAuthService() {
   const syncConfig = resolveSyncConfig({ userDataDir: app.getPath('userData') });
   if (!syncConfig.configured) {
@@ -259,12 +178,7 @@ function buildAuthService() {
     );
     return null;
   }
-  // On Linux, isEncryptionAvailable() can still be true with the
-  // 'basic_text' backend (no keyring/D-Bus secret service), which uses a
-  // hardcoded key rather than one backed by the OS — the session file is
-  // then not meaningfully encrypted at rest. Auth still works (this is
-  // strictly better than the alternative of refusing to persist a session
-  // at all), but it's worth a loud warning rather than a silent downgrade.
+  // Linux can report encryption support while using an obfuscation-only backend.
   if (
     process.platform === 'linux' &&
     typeof safeStorage.getSelectedStorageBackend === 'function' &&
@@ -295,10 +209,6 @@ function buildAuthService() {
   }
 }
 
-// Builds the sync engine (Phases 4-5), sharing the auth service's own
-// supabase-js client. Never started here — only main.js's authService
-// .onChange handler below start()s/stop()s it, so pushes/pulls only run
-// while signed in (see docs/supabase-sync-plan.md's "Local-first" note).
 function buildSyncEngine(client) {
   return createSyncEngine({
     client,
@@ -313,61 +223,24 @@ function buildSyncEngine(client) {
   });
 }
 
-// Builds the realtime sync trigger (Phase 6), sharing the same
-// supabase-js client as auth/sync rather than opening a second
-// connection — this is also what keeps the realtime socket authorized
-// across token refreshes, since the client's own
-// auth.onAuthStateChange -> realtime.setAuth wiring runs regardless of
-// who else is using the client (see sync/realtime.js's own doc
-// comment). `onChange` is wired straight to the sync engine's existing
-// coalescing trigger — a realtime event never merges its own payload,
-// it just means "pull now", the same as the 60s interval or a window
-// focus.
 function buildRealtimeSync(client, engine) {
   return createRealtimeSync({ client, onChange: () => engine.triggerNow() });
 }
 
-// Builds and wires up authService/syncEngine/syncLifecycle — shared
-// between normal startup (app.whenReady() below) and the in-process "a
-// key was just saved via the startup prompt" flow (see syncConfig:saveKey
-// below), so both go through exactly one code path rather than two
-// copies that could drift. Idempotent: a second call while authService
-// is already set is a no-op (returns false) — there's nothing left to
-// build, and buildAuthService() would just repeat the same work for
-// nothing. Returns whether it actually (re)built anything; throws if a
-// build step past buildAuthService() fails (see the try/catch below for
-// what that does before rethrowing) — callers that need this to never
-// throw (app.whenReady() below, sync/save-key-handler.js) wrap this call
-// themselves.
-//
-// The module-level authService/syncEngine/syncLifecycle variables are
-// only assigned right at the end, once every step below has already
-// succeeded — found in review: assigning `authService` first (as this
-// used to) meant a throw from buildSyncEngine()/buildRealtimeSync()/
-// createSyncLifecycle()/authService.onChange() left `authService` set
-// without a matching syncEngine/syncLifecycle, and every other place in
-// this file that treats a non-null `authService` as "sync is fully up"
-// (isAlreadyConfigured() below, the auth:signOut handler, ...) would
-// then act on that half-built state instead of the clean "not
-// configured" one a throw ought to leave behind.
 function initSyncAndAuth() {
   if (authService) return false;
   const built = buildAuthService();
   if (!built) return false;
+  // Publish module state only after every collaborator has been built.
   try {
     const engine = buildSyncEngine(built.client);
     const realtime = buildRealtimeSync(built.client, engine);
     const lifecycle = createSyncLifecycle({ engine, realtime });
     built.service.onChange((status) => {
       if (win) win.webContents.send('auth:stateChanged', status);
-      // All the start/stop/subscribe/unsubscribe transition logic lives
-      // in sync/sync-lifecycle.js (see its own doc comment for the
-      // subscribe-after-sign-out race this closes).
       const wasRunning = lifecycle.isRunning();
       lifecycle.handleAuthStatus(status);
       if (wasRunning && !lifecycle.isRunning()) {
-        // Hide the status indicator on sign-out — a signed-out state
-        // shows no sync UI at all, per the plan.
         if (win) win.webContents.send('sync:stateChanged', { state: null });
       }
     });
@@ -376,34 +249,14 @@ function initSyncAndAuth() {
     syncLifecycle = lifecycle;
     return true;
   } catch (err) {
-    // buildAuthService() already left a *live* auth service (subscribed
-    // to the client's onAuthStateChange) and a supabase-js client behind
-    // by the time any of the steps above can throw — found in review.
-    // Left alone, a later successful retry of initSyncAndAuth() builds a
-    // *second* client/service pair, and two independently
-    // auto-refreshing clients rotating the same refresh token can get
-    // the session revoked outright. sync/dispose-auth-attempt.js tears
-    // this failed attempt down (best-effort, never throws itself) before
-    // the error is rethrown for the caller to handle — it also correctly
-    // waits for the client to actually finish initializing (see its own
-    // doc comment for why that matters) before calling
-    // stopAutoRefresh(), so this fires-and-forgets its returned promise
-    // rather than awaiting it: rethrowing synchronously right away is
-    // what matters here, not waiting for that cleanup to finish first.
+    // Avoid leaving a second auth client refreshing the same session.
     disposeFailedAuthAttempt({ service: built.service, client: built.client });
     throw err;
   }
 }
 
+// The renderer requests an initial snapshot in case it missed an early status event.
 ipcMain.handle('sync:status', async () => {
-  // The only way the renderer can learn the current sync status other
-  // than waiting for the next 'sync:stateChanged' push — needed because
-  // that push can otherwise go nowhere: main.js starts the engine (from
-  // authService.onChange, which can fire before createWindow()/`win` is
-  // set) before the renderer has registered its listener, and setStatus
-  // dedupes identical statuses, so a "synced" pushed once before anyone
-  // was listening then never gets pushed again. Sync.init() calls this
-  // once on load/reload, the same way Auth.init() calls authStatus().
   return syncLifecycle && syncLifecycle.isRunning() ? syncEngine.getStatus() : null;
 });
 
@@ -439,24 +292,11 @@ ipcMain.handle('auth:signOut', async () => {
   }
 });
 
-/* ---------- Startup "add your key" prompt ----------
-   Shown by the renderer only when this reports true — which folds in
-   the "env vars fully configure it" case for free, since
-   resolveSyncConfig() only reports `configured: false` when no key was
-   found from any source (see sync/config.js's own doc comment). */
 ipcMain.handle('syncConfig:needsKey', async () => {
   const syncConfig = resolveSyncConfig({ userDataDir: app.getPath('userData') });
   return !syncConfig.configured;
 });
 
-// The validate -> skip-if-configured -> save -> init sequencing (plus the
-// concurrency guard that keeps two near-simultaneous saveKey calls from
-// each running that whole sequence independently) lives in
-// sync/save-key-handler.js, a pure module unit-tested with fakes — see
-// its own doc comment and test/sync-save-key-handler.test.js. Wraps
-// initSyncAndAuth so a successful in-process init also rebuilds the
-// Radar menu (Sign Out now applies) — the pure module itself has no
-// notion of the menu.
 const saveKeyHandler = createSaveKeyHandler({
   validateKey: validatePublishableKey,
   isAlreadyConfigured: () => !!authService,
@@ -471,7 +311,6 @@ const saveKeyHandler = createSaveKeyHandler({
 
 ipcMain.handle('syncConfig:saveKey', async (_e, rawKey) => saveKeyHandler.handleSaveKey(rawKey));
 
-/* ---------- Menu ---------- */
 function buildMenu() {
   const isMac = process.platform === 'darwin';
   const send = (action) => () => {
@@ -541,7 +380,6 @@ function buildMenu() {
   Menu.setApplicationMenu(Menu.buildFromTemplate(template));
 }
 
-/* ---------- App lifecycle ---------- */
 async function createWindow() {
   const state = await loadWinState();
   win = new BrowserWindow({
@@ -553,8 +391,6 @@ async function createWindow() {
     minHeight: 420,
     backgroundColor: '#010805',
     title: 'Work Radar',
-    // Used for the window/taskbar icon on Windows and Linux (ignored on macOS,
-    // which takes the icon from the .icns in the packaged bundle / dock below).
     ...(fs.existsSync(ICON_PNG) ? { icon: ICON_PNG } : {}),
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
@@ -577,14 +413,7 @@ async function createWindow() {
   win.on('closed', () => {
     win = null;
   });
-  // Window focus is one of the sync engine's triggers (see
-  // docs/supabase-sync-plan.md's Phase 4-5 notes) — a no-op while sync
-  // isn't running, so this is safe to wire unconditionally.
   win.on('focus', () => {
-    // triggerNow() is fire-and-forget here (the focus handler can't await
-    // it) — without a .catch, anything that throws outside runCycle's own
-    // try/catch (e.g. getUserId()/now() themselves) becomes an unhandled
-    // rejection with no cycleId context (found in review).
     if (syncLifecycle && syncLifecycle.isRunning()) {
       syncEngine.triggerNow().catch((err) => log.error('sync focus trigger failed', { err }));
     }
@@ -593,9 +422,6 @@ async function createWindow() {
 }
 
 app.whenReady().then(async () => {
-  // Dev convenience: show the radar icon in the macOS dock. Packaged builds
-  // get their dock icon from the bundled .icns, but `electron .` would
-  // otherwise show the generic Electron icon.
   if (process.platform === 'darwin' && app.dock && fs.existsSync(ICON_PNG)) {
     app.dock.setIcon(ICON_PNG);
   }
@@ -604,11 +430,6 @@ app.whenReady().then(async () => {
   try {
     initSyncAndAuth();
   } catch (err) {
-    // A throw here (found in review) must never stop buildMenu()/
-    // createWindow() below from running — sync is optional, and a
-    // failure bringing it up must degrade to the app opening fully
-    // local, exactly like an unconfigured/no-secret-store run, not to no
-    // window opening at all.
     log.error('initSyncAndAuth failed at startup — continuing fully local', { err });
   }
   buildMenu();

@@ -116,12 +116,7 @@ function commit() {
 
 /* ---------- Actions ---------- */
 const Actions = {
-  // add/update go through domain.js's createItem/updateItem, same as every
-  // mutation below, so the clock-skew-safe updatedAt bump (see
-  // domain.js's nextUpdatedAt) is unit-tested rather than only reachable
-  // through the DOM — found in the Phase 1 review as a gap: these two used
-  // to patch Store.items inline with a bare Date.now(), untested and
-  // without the guard the other mutations already had.
+  // Keep timestamp rules in the tested domain layer.
   add(v) {
     Store.items.push(D.createItem(v, Date.now(), uid));
     commit();
@@ -271,17 +266,7 @@ const Actions = {
    Radar menu, not here (main.js only adds that menu item when sync is
    configured). */
 const Auth = {
-  // Set once the 'auth:stateChanged' listener and the #auth-form submit
-  // listener have actually been registered — found in review: init() is
-  // deliberately called a second time by SyncConfigPrompt.save() (see
-  // below) so a session that started out unconfigured can show the
-  // sign-in panel without an app restart, but init() used to re-run its
-  // whole body including both addEventListener calls on every call that
-  // got past the "configured" check. Two submit listeners on the same
-  // form meant one click fired Auth.submit() twice — the second
-  // authSignIn() call then failed with "a sign-in is already pending".
-  // This flag makes registering the listeners a one-time effect no
-  // matter how many times init() itself runs.
+  // init() can run again after an in-process key save; bind listeners once.
   _listenersBound: false,
   async init() {
     if (!HAS_API || !window.radarAPI.authStatus) return;
@@ -381,11 +366,7 @@ const SyncConfigPrompt = {
     }
     if (!needsKey) return;
     document.getElementById('sync-key-overlay').hidden = false;
-    // aria-modal alone doesn't stop Tab (or a click) from reaching
-    // elements behind the overlay (found in review) — #app is the
-    // overlay's only sibling in index.html, so marking it inert blocks
-    // focus and pointer interaction with everything behind the overlay
-    // without making the overlay itself inert too.
+    // aria-modal does not prevent focus or clicks behind the overlay.
     document.getElementById('app').inert = true;
     document.getElementById('sync-key-form').addEventListener('submit', (e) => {
       e.preventDefault();
@@ -934,13 +915,7 @@ function wire() {
   });
 
   document.addEventListener('keydown', (e) => {
-    // The startup key-prompt overlay covers the whole viewport, but a
-    // keydown on `document` fires regardless of what's visually on top —
-    // found in review: tabbing from the overlay's input to its Save/Not
-    // Now buttons (neither is an INPUT/TEXTAREA/SELECT, so the `typing`
-    // guard below didn't catch it) let 'n'/'e'/'p'/'a'/'/' reach the app
-    // behind the overlay while it was still open. Escape here also
-    // doubles as "Not now", consistent with the button.
+    // Block app shortcuts while the modal is open; Escape dismisses it.
     if (SyncConfigPrompt.isOpen()) {
       if (e.key === 'Escape') {
         e.preventDefault();

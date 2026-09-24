@@ -407,11 +407,7 @@ ${groupsHTML}
     };
   }
 
-  // Actions.add/update in app.js route through these two rather than
-  // patching Store.items inline, for the same reason as the mutations
-  // above — found in the Phase 1 review as a carried-over gap: add/update
-  // were still stamping updatedAt = Date.now() directly in app.js,
-  // un-tested and without the clock-skew guard every other mutation gets.
+  // Keep item creation and clock-skew-safe updates out of the DOM layer.
   function createItem(v, now = Date.now(), idFn = uid) {
     return { id: idFn(), ...v, log: [], addedAt: now, updatedAt: now, reviewedAt: now };
   }
@@ -420,20 +416,8 @@ ${groupsHTML}
     return { ...item, ...patch, updatedAt: nextUpdatedAt(item.updatedAt, now) };
   }
 
-  // Merges a freshly-read data file into the renderer's in-memory Store
-  // (renderer/app.js's Sync.reload(), pulled out to be unit-testable —
-  // found in review: this used to be inline DOM-adjacent code with no
-  // test), rather than replacing it the way Store.load() does. A plain
-  // replace can lose an edit made in this renderer that hasn't reached
-  // disk yet: a save still in flight when a reload runs would roll the
-  // Store back to the pre-edit copy, and a save still sitting in the
-  // debounce window would then serialize the reloaded (pre-edit) Store
-  // over the edit on disk. The merge is safe for the same reason the rest
-  // of sync is: it's the same last-writer-wins rule that already
-  // reconciles two machines, just applied here to reconcile "the
-  // renderer's in-memory view" against "what main just wrote to disk".
-  // `fromDisk`'s items/arch are migrate()d first, in case the file on
-  // disk predates a schema bump this renderer already knows about.
+  // Merge instead of replacing so reload cannot erase a renderer edit whose
+  // save is still in flight. Migrate disk data before applying merge rules.
   function mergeDiskIntoStore(fromDisk, store) {
     const merged = mergeState(
       {
@@ -442,13 +426,7 @@ ${groupsHTML}
       },
       { items: store.items, arch: store.arch }
     );
-    // Never rolls backwards: a reload landing after an export has set
-    // Store.lastExport in memory but before that save reaches disk must
-    // not roll it back to the stale on-disk value (found in review) — the
-    // "back up your data" nudge would otherwise reappear right after an
-    // export that already happened. `|| 0` treats a missing lastExport on
-    // either side as "never exported" rather than as bigger than a real
-    // timestamp.
+    // An in-flight export must not be rolled back by stale disk state.
     return {
       items: merged.items,
       arch: merged.arch,

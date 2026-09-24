@@ -70,9 +70,7 @@ function validatePublishableKey(rawKey) {
   if (Buffer.byteLength(key, 'utf8') > MAX_KEY_LENGTH_BYTES) {
     return { ok: false, error: 'That key is too long to be a real Supabase key.' };
   }
-  // Checked as a substring, anywhere — not just as a prefix — since a
-  // secret key can be smuggled in after a newline/space alongside an
-  // otherwise-valid-looking publishable key or JWT (found in review).
+  // Reject secret material anywhere in the input, including appended lines.
   if (key.includes('sb_secret_')) {
     return {
       ok: false,

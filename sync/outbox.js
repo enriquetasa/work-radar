@@ -1,21 +1,6 @@
 'use strict';
-/* ============================================================
-   WORK RADAR — outbox diffing
-   Works out which items/log entries need pushing by comparing a
-   data:save payload against a lightweight snapshot of the last payload
-   the sync engine saw — never by trusting the renderer to report what
-   changed (see docs/supabase-sync-plan.md's Phase 4-5 notes). Pure, no IO.
 
-   `data` throughout is the shape renderer/domain.js's serialize()
-   produces: { items: [...], arch: [...] } (each item optionally
-   carrying a `log` array).
-   ============================================================ */
-
-// A snapshot is deliberately tiny — just enough to detect "this item
-// changed" (its updatedAt moved) and "this log entry is new" (its id
-// wasn't seen before) — so it's cheap to persist in sync-state.json
-// alongside the outbox itself, rather than keeping a full copy of the
-// last-synced data file around.
+// Persist only enough state to detect changed items and new append-only log entries.
 function snapshotOf(data) {
   const items = {};
   const logEntryIds = [];
@@ -26,11 +11,6 @@ function snapshotOf(data) {
   return { items, logEntryIds };
 }
 
-// Compares two snapshots and returns the ids that need to be (re-)pushed:
-// an item whose id is new or whose updatedAt moved, and a log entry
-// whose id wasn't in the previous snapshot at all (log entries are
-// append-only — they never change once written, so "new id" is the only
-// way one can need pushing).
 function diffSnapshot(prev, next) {
   const prevItems = (prev && prev.items) || {};
   const prevLogIds = new Set((prev && prev.logEntryIds) || []);
@@ -41,9 +21,7 @@ function diffSnapshot(prev, next) {
   return { changedItemIds, newLogEntryIds };
 }
 
-// Deduplicated union, order-preserving (existing ids first) so a
-// repeatedly-failing id doesn't get reshuffled to the back of the queue
-// on every retry.
+// Preserve queue order so repeated failures do not jump behind newer work.
 function unionIds(a, b) {
   const seen = new Set(a || []);
   const out = [...(a || [])];
@@ -61,11 +39,6 @@ function removeIds(ids, toRemove) {
   return (ids || []).filter((id) => !gone.has(id));
 }
 
-// Indexes the full data file by id, for turning a list of pending ids
-// (which is all the persisted outbox keeps) back into pushable rows.
-// Log entries are indexed with the id of the item they belong to, since
-// push_log_entries needs itemId and domain.js's log entries don't carry
-// it themselves (they live nested inside their item).
 function indexData(data) {
   const itemsById = new Map();
   const logEntriesById = new Map();
@@ -78,8 +51,6 @@ function indexData(data) {
   return { itemsById, logEntriesById };
 }
 
-// Splits an array into chunks of at most `size` — used to keep push
-// batches (and, incidentally, any other bulk RPC call) bounded.
 function chunk(arr, size) {
   if (!arr.length) return [];
   const out = [];
@@ -87,19 +58,7 @@ function chunk(arr, size) {
   return out;
 }
 
-// Returns a snapshot equal to `prevSnapshot`, except that the given item
-// ids and log-entry ids are set (or added) from `data` — every other id
-// already in `prevSnapshot` is carried over completely untouched. Used
-// everywhere a merge just wrote back only *part* of `data` (a pull that
-// merged some ids, or recordLocalSave's own diff) instead of the whole
-// thing, so that write's own snapshot update can't silently mark some
-// *other* id "already seen" that merge never actually looked at (found in
-// review: a wholesale `snapshot: snapshotOf(mergedPayload)` after a pull
-// bakes in whatever a concurrent recordLocalSave had already written to
-// disk moments earlier, before recordLocalSave itself gets a chance to
-// diff and queue it — see sync-engine.js's pull-and-merge functions and
-// recordLocalSave). An id in `itemIds`/`logEntryIds` that `data` doesn't
-// actually contain is ignored, never invented.
+// Patch only ids touched by the caller; concurrent work may own the rest.
 function patchSnapshot(prevSnapshot, data, itemIds, logEntryIds) {
   const { itemsById, logEntriesById } = indexData(data);
   const items = { ...((prevSnapshot && prevSnapshot.items) || {}) };
