@@ -1651,6 +1651,19 @@ sb_secret_def'`, a bare `'sb_publishable_'` with nothing after the
   env var still resolved first. Excluding a rejected candidate from
   consideration entirely closes that loop: the prompt keeps showing only
   until a key that actually validates is available from _some_ source.
+  **The on-screen feedback differs by source, deliberately left that way**
+  (found in review, and corrected in the README rather than in code): the
+  prompt shows a clear inline error, because that path already has a UI to
+  show it in; an env var or file key only ever gets a log warning — there
+  is no "startup error dialog" to put it in — and from there is
+  indistinguishable from no key having been supplied: if some other source
+  has a valid key, that one wins and sync comes up normally; if not,
+  `configured` is `false` and the prompt appears asking for a key, exactly
+  as if none had ever been set (`syncConfig:needsKey` is nothing more than
+  `!resolveSyncConfig(...).configured`, so there is no separate "silently
+  stay disabled without prompting" outcome for a rejected env key — it
+  reaches the same `configured: false` path as a rejected file key or no
+  key at all).
 
 - **A bare JSON `null` (or any other non-object) in `sync-config.json`
   crashed `resolveSyncConfig()`** — `parsed.url` on a `null` `parsed`
@@ -1674,19 +1687,26 @@ sb_secret_def'`, a bare `'sb_publishable_'` with nothing after the
      re-renders on every call, but only registers `onAuthStateChanged` and
      the submit listener the first time it ever gets past the
      "configured" check.
-  2. Nothing disabled the prompt's **SAVE** button while a save was in
-     flight, so a fast double-click (or the listener bug above, before it
-     was fixed) could fire two `syncConfig:saveKey` IPC calls. Fixed in
-     `renderer/app.js`'s `SyncConfigPrompt.save()`: the button is disabled
-     for the duration of the call, in a `finally` block, and a second call
-     arriving anyway while it's already disabled is a no-op.
-  3. Even with both renderer fixes above, main.js's own handler had no
-     guard of its own: two overlapping `syncConfig:saveKey` calls could
-     both observe `authService` as still `null` before either had
-     finished `await`ing its own save, so both went on to call
-     `initSyncAndAuth()` — the second one running against an `authService`
-     the first had _just_ set, logging a false "auth could not be
-     initialized" for a save that had actually succeeded. The
+  2. **The actual root cause: nothing disabled the prompt's SAVE button
+     while a save was in flight**, so a fast double-click on it fired two
+     `syncConfig:saveKey` IPC calls — the #auth-form listener bug above is
+     a _consequence_ of that (each of the two saves' renderer-side success
+     handler calls `Auth.init()` once), not a second, independent way to
+     trigger it; a corrected copy of `sync/save-key-handler.js`'s own doc
+     comment spells out that ordering, since an earlier draft had it
+     backwards. Fixed in `renderer/app.js`'s `SyncConfigPrompt.save()`: the
+     button is disabled for the duration of the call, in a `finally`
+     block, and a second call arriving anyway while it's already disabled
+     is a no-op.
+  3. Even with the renderer fix above, main.js's own handler had no guard
+     of its own: two overlapping `syncConfig:saveKey` calls could both
+     observe `authService` as still `null` before either had finished
+     `await`ing its own save, so both went on to call `initSyncAndAuth()`
+     — the second one running against an `authService` the first had
+     _just_ set, logging a false "auth could not be initialized", though
+     the old handler's unconditional final `return { ok: true }` masked it
+     from the renderer either way (not `{ ok: false }` — an earlier draft
+     of this note had that backwards too). The
      validate → skip-if-configured → save → init sequencing was extracted
      out of the inline IPC handler into `sync/save-key-handler.js`'s
      `createSaveKeyHandler()` — a pure, dependency-injected module in the
@@ -1697,6 +1717,52 @@ sb_secret_def'`, a bare `'sb_publishable_'` with nothing after the
      or future) might otherwise cause one. Unit-tested with fakes,
      including a test that starts two overlapping calls and asserts
      `saveKey`/`initSyncAndAuth` each ran exactly once.
+  4. **A call for a genuinely different key must never be handed an
+     in-flight save's result** — found in review: the join above matched
+     on "is anything pending", not on which key it was for, so (in a
+     hypothetical the UI itself can't reach, since only one key can ever
+     sit in the input) a second call for a _different_ key would have
+     silently gotten back the first key's outcome without ever being
+     validated or saved itself. `pending` is now paired with `pendingKey`
+     (the trimmed key it's running for); a call whose own trimmed key
+     matches joins it as before, but a call for a different key instead
+     awaits the in-flight run to settle (discarding its result) and then
+     recurses into a fresh `handleSaveKey()` call, tagged `asWaitedRetry`.
+     If the first save had failed, that fresh run genuinely saves and
+     configures _this_ key like any other call would. If the first save
+     had succeeded, `run()` finds `isAlreadyConfigured()` already true —
+     and a second review pass caught that the fresh run then returned the
+     ordinary `{ ok: true, alreadyConfigured: true }` skip, which is
+     misleading here specifically: it tells the caller its own key is now
+     in effect, when really the _other_, concurrent call's key won
+     instead. The `asWaitedRetry` tag makes `run()` report that case as
+     `{ ok: false, error: 'Sync is already configured.' }` instead — a
+     plain direct call that finds sync already configured (no race
+     involved) is unaffected and still gets the ordinary success skip.
+     Covered by dedicated tests: a different-key call doesn't resolve
+     early, never triggers a second `saveKey`, and gets the honest
+     failure back; a same-key-plus-whitespace call still joins (matched
+     on the _trimmed_ key, same as validation does); and the plain
+     "already configured, no race" case keeps its original `ok: true`.
+  5. **A throwing `initSyncAndAuth()` was unhandled at the
+     `sync/save-key-handler.js` call site** — nothing logged it, and it
+     could leave `main.js`'s module-level `authService` assigned without
+     a matching `syncEngine`/`syncLifecycle` if the throw came from a
+     step after `authService` used to be set first. Fixed on both sides:
+     `sync/save-key-handler.js`'s `run()` now wraps the call in try/catch,
+     logs the error with `{ err }` context (never the key) and returns
+     `{ ok: false, error: "Key saved, but sync could not be started — see
+the app logs for details." }` — the key itself stays saved, only sync's
+     in-process startup is reported as failed. `main.js`'s `initSyncAndAuth()`
+     now builds `syncEngine`/`syncLifecycle` into local variables and only
+     assigns them (together with `authService`) to the module-level state
+     _after_ every step, including `authService.onChange(...)`, has
+     already succeeded — so a throw from any of them leaves every
+     module-level variable exactly as it was before the call, never a
+     half-built mix that `isAlreadyConfigured()` (or the `auth:signOut`
+     handler, or anything else keying off `authService`) would otherwise
+     misread as "sync is fully up". See the second review pass below for
+     what else this uncovered.
 
 - **A successful save whose `initSyncAndAuth()` returns `false`** (e.g. no
   OS secret store for `safeStorage`) used to still report `{ ok: true }` to
@@ -1720,6 +1786,104 @@ start." }` for that case specifically, distinct from both the ordinary
   INPUT/TEXTAREA/SELECT, but the overlay's **SAVE**/**NOT NOW** buttons are
   neither, so tabbing from the input to a button (or just clicking one) let
   a shortcut key reach the app behind the overlay even while it was open.
+  **`aria-modal` alone doesn't trap focus, either** (found in a follow-up
+  review) — it's a hint for assistive tech, not something that stops `Tab`
+  from cycling into, or a click from reaching, the buttons and inputs
+  behind the overlay. `renderer/app.js` now sets `document.getElementById
+('app').inert = true` when the overlay opens and back to `false` on
+  dismiss — `#app` is the overlay's only sibling in `index.html`, so this
+  blocks focus and pointer interaction with everything behind the overlay
+  without ever making the overlay itself inert. A static test
+  (`test/sync-key-overlay-inert.test.js`, in the same no-jsdom,
+  read-the-source style as `test/renderer-css.test.js`) asserts both the
+  `inert = true`/`inert = false` calls exist and that `#sync-key-overlay`
+  is genuinely a sibling of `#app` rather than nested inside it — the
+  latter being what would make the `inert` fix backfire by disabling the
+  overlay along with the app behind it.
+
+### Third review pass
+
+- **BLOCKING, fixed first: a `log.debug` call existed solely to dodge an
+  eslint `no-unused-vars` warning.** The second review pass added a
+  module-level `realtimeSync` variable purely for symmetry with
+  `authService`/`syncEngine`/`syncLifecycle`, then — since nothing ever
+  read it — added a `log.debug('sync/auth/realtime wired up', {
+hasRealtime: !!realtimeSync })` line whose only real purpose was to
+  give eslint a reader so it would stop flagging the assignment as dead.
+  That's exactly what the code-quality rule's "no dodging lint without a
+  waiver" line means to catch. Fixed by removing `realtimeSync` (the
+  `let` declaration, its doc comment, the assignment, and the `log.debug`
+  call) entirely, along with every mention of it in nearby comments —
+  nothing in this file ever needed to hold a reference to the realtime
+  sync trigger itself; `syncLifecycle` is the only thing that ever calls
+  `subscribe()`/`unsubscribe()` on it, and already owns that.
+
+- **`initSyncAndAuth()`'s failure path could leave a live, auto-refreshing
+  supabase-js client and a subscribed auth service running even after the
+  throw.** `buildAuthService()` returns a fully-constructed client/service
+  pair — the service is already subscribed to the client's
+  `onAuthStateChange`, and supabase-js's own auto-refresh ticker for that
+  client will already be running by the time it's finished initializing
+  (see the next bullet for exactly when that is) — before any of the
+  steps that can actually throw (`buildSyncEngine`/`buildRealtimeSync`/
+  `createSyncLifecycle`/`authService.onChange`) even run. Left alone, a
+  later successful retry of `initSyncAndAuth()` calls `buildAuthService()`
+  again and gets a _second_ client/service pair; two independently
+  auto-refreshing clients then rotate the same refresh token against
+  Supabase, which treats a refresh token as single-use and can revoke the
+  session entirely as a result. `sync/dispose-auth-attempt.js`'s
+  `disposeFailedAuthAttempt({ service, client, log })` — a small,
+  dependency-injected, best-effort module — is now called in
+  `initSyncAndAuth()`'s `catch` block before the error is rethrown: it
+  calls `service.dispose()` (already existed on `sync/auth-service.js`'s
+  returned API — clears its listeners and unsubscribes from the client)
+  and, once the client is actually ready, `client.auth.stopAutoRefresh()`,
+  catching and logging (never throwing) a failure in either one, since
+  this runs inside an already-failing path and must not produce a second
+  error on top of the first. Unit-tested directly with fakes
+  (`test/sync-dispose-auth-attempt.test.js`) — the full `initSyncAndAuth()`
+  wiring itself is not separately tested, the same "thin wiring in
+  main.js" convention every other phase has followed, since it needs
+  Electron/supabase-js and the rest of this file's module-level state to
+  actually run; extracting the cleanup into its own pure module is what
+  makes the part that matters (not leaking a second live client on
+  failure) testable without that. `main.js`'s own call fires this and
+  rethrows immediately without awaiting it — the promise this module
+  returns exists so a caller (or a test) that actually wants to wait for
+  the cleanup to settle can, not because main.js itself needs to.
+
+- **A second look at this same fix found `stopAutoRefresh()` could run
+  before the ticker it's meant to stop had even started.** supabase-js's
+  auto-refresh ticker isn't running immediately after `createClient()`
+  returns: `createClient()` kicks off auth's `initialize()` in the
+  background without awaiting it, and — in a non-browser environment like
+  this app's main process — it's `_initialize()`'s own `finally` block
+  (which only runs once the persisted session has actually been read)
+  that calls `startAutoRefresh()`, not `createClient()` itself. The first
+  version of `disposeFailedAuthAttempt()` called `stopAutoRefresh()`
+  straight away, which could complete before that ticker had even
+  started — reproduced against the installed auth-js 2.117.1 with this
+  app's own client options — and `initialize()` then started it anyway
+  moments later, defeating the whole point of stopping it. Fixed by
+  awaiting `client.auth.initialize()` first: auth-js caches the
+  in-flight/settled `initializePromise`, so calling `initialize()` again
+  here is safe and never starts a second initialization — it just
+  guarantees the ticker decision has already been made by the time
+  `stopAutoRefresh()` runs. Test written failing first, with a fake
+  client whose ticker only flips on once its `initialize()` resolves, on
+  a later tick, independently of anything the module under test does
+  (modelling the real background `_initialize()` call `createClient()`
+  already kicked off) — the old code passed the fake's `dispose`/`stop`
+  calls immediately, before that later tick, so the test caught the
+  ticker still running once the background tick had actually fired.
+
+- **A throw from `initSyncAndAuth()` at startup used to stop
+  `buildMenu()`/`createWindow()` from ever running** — sync failing to
+  come up would mean no window opens at all, rather than the app falling
+  back to fully local as it does for every other "sync isn't available"
+  reason (no config, no secret store, ...). `app.whenReady()`'s call is
+  now wrapped in its own try/catch, logging the error and continuing to
+  `buildMenu()`/`createWindow()` either way.
 
 ## Open items
 

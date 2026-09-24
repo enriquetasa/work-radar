@@ -131,13 +131,22 @@ independently, checked in this order:
 whether it's typed into the prompt, dropped in via `sync-config.json`, or
 set as `WORK_RADAR_SUPABASE_KEY` — before it's ever used. Anything that
 looks like a secret or service key (`sb_secret_…` anywhere in the value, or
-a JWT whose role is `service_role`) is rejected with a clear error and
-never written to disk or used to configure sync, since only the
-publishable key is meant to leave RLS as the sole thing protecting your
-data (see the sign-in flow doc for why). A rejected key is treated exactly
-like no key at all — including one set via an env var, so a typo'd or
-accidentally-secret `WORK_RADAR_SUPABASE_KEY` doesn't silently win over a
-good key already saved in `sync-config.json`.
+a JWT whose role is `service_role`) is rejected and never written to disk
+or used to configure sync, since only the publishable key is meant to
+leave RLS as the sole thing protecting your data (see the sign-in flow doc
+for why).
+
+How you find out differs by source. Typing a bad key into the startup
+prompt shows a clear on-screen error right there, and nothing is saved. A
+bad key from an env var or `sync-config.json` gets no on-screen message —
+only a warning in the logs — and is simply treated exactly like no key at
+all from that source: if a valid key is found elsewhere (e.g. one already
+saved via the prompt on an earlier run), that one is used instead and sync
+comes up normally; if not, sync stays unconfigured and the startup prompt
+appears asking for a key, the same as if none had ever been set. This
+applies equally to `WORK_RADAR_SUPABASE_KEY` and a hand-edited
+`sync-config.json` — a typo'd or accidentally-secret key from either one
+never silently wins over a good key available from another source.
 
 Never commit real values for either the URL override or the key — keep them
 out of version control, per the secrets rule (env vars locally, or the
