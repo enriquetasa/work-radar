@@ -239,6 +239,169 @@ merge later.
   synced devices" rather than the old "permanently ... cannot be undone",
   which stopped being true once purge became a tombstone.
 
+## Phase 2 notes (database)
+
+Implemented as five migrations under `supabase/migrations/`, applied and
+linted against the local stack (`npx supabase db reset`,
+`npx supabase db lint`). No app code talks to Supabase yet — this phase is
+schema, RLS and two RPCs only, tested directly against local
+Postgres/PostgREST.
+
+- **Schema matches the plan as written**, adjusted for what Phase 1 actually
+  built: `items` and `log_entries` have the columns above, snake_case,
+  `timestamptz` throughout (the client's epoch-ms numbers convert at the
+  sync-engine boundary in a later phase, not here). Two indexes per table:
+  `(user_id, synced_at, id)` for the pull query — `id` is there for keyset
+  pagination, see the `synced_at` caveat below — plus `log_entries(item_id)`
+  for the cascade delete and the ownership check inside `push_log_entries`.
+- **`log_entries.item_id` is a composite foreign key on `(item_id, user_id)`**,
+  referencing `items (id, user_id)` (which needs its own `unique (id,
+user_id)`, added alongside the primary key, purely so it can be an FK
+  target), not a plain `references items(id)`. A foreign key check bypasses
+  RLS entirely, so a single-column FK only proves the item exists somewhere
+  — it says nothing about who owns it, and the insert policy on
+  `log_entries` only checks the log entry's own `user_id`. Without the
+  composite key, user B could call
+  `.from('log_entries').insert({ item_id: <A's item>, user_id: B, ... })`
+  directly through PostgREST and it would succeed: B's row would satisfy
+  both RLS (`user_id = B`) and the plain FK (the item exists), attaching a
+  log entry to an item B doesn't own — bypassing `push_log_entries`'s own
+  ownership check entirely, since that check only runs inside the RPC. The
+  composite FK closes this at the schema level: `(item_id, user_id)` must
+  jointly match a row in `items`, so it fails for any `item_id` not owned
+  by that same `user_id`, whichever path is used to insert.
+- **No delete policy on either table, deliberately.** PURGE is a tombstone
+  (`deleted_at` set via an ordinary update — see `mergeItem`'s doc comment
+  in `renderer/domain.js` for why deletion has to merge like any other
+  edit) and the log is append-only, so the app never issues a SQL `DELETE`
+  against either table. Omitting the policy means RLS denies every
+  `DELETE` by default for `anon` and `authenticated` — the only roles the
+  app and PostgREST use, since row security is "deny unless a policy
+  grants it". (The table owner, `postgres` and `service_role` bypass RLS
+  entirely, and so does `TRUNCATE`, which is why `DELETE`/`TRUNCATE` are
+  also explicitly revoked from `anon`/`authenticated` — Supabase grants
+  them by default otherwise.) So even a compromised client, or the push
+  RPCs acting as the caller (`security invoker`), physically cannot
+  hard-delete a row through the normal API. Rows only disappear via
+  `on delete cascade` from `auth.users`, which runs as the table owner and
+  isn't subject to RLS. Covered by an integration test: the owner's own
+  direct `.delete()` on each table is rejected outright with a
+  `42501`/"permission denied" error — the explicit `revoke delete` means
+  this fails before RLS even gets a chance to evaluate a policy and match
+  zero rows, which is what would happen if only the missing policy were
+  relied on.
+- **`log_entries` gets no update policy either**, append-only by design
+  (unioned by id on the client, never diffed — `domain.js`'s `unionLogs`).
+  Nothing in the app or `push_log_entries` ever updates a row once
+  inserted. Covered by an integration test: the owner's own direct
+  `.update()` on a log entry affects zero rows and leaves it unchanged.
+- **`synced_at` is set by a `before insert or update` trigger**
+  (`set_synced_at()`), not just a column default — a default only covers
+  a bare `INSERT` that omits the column; it does nothing for `UPDATE` and
+  nothing to stop a client passing its own value. The trigger overwrites
+  `NEW.synced_at` unconditionally on every write. Verified directly in the
+  integration tests by updating a row with a forged `synced_at` and
+  asserting it comes back current.
+  **This makes `synced_at` trustworthy as "the server touched this row",
+  but it is not by itself a safe `gt(cursor)` pull cursor** — see the
+  `synced_at_trigger` migration's comment for the full reasoning. In short:
+  `now()` is transaction-start time, not commit time, so overlapping pushes
+  can commit in an order their `synced_at` values don't reflect, and a
+  naive cursor can permanently skip a row committed "late". And every row
+  in one push shares one `synced_at`, so a paginated pull that stops
+  partway through a batch can skip the rest of it. Phase 4 (the sync
+  engine, which is the first phase that actually pulls) must pull with a
+  lookback window rather than a bare `gt` — safe because `mergeItem`/
+  `unionLogs` are idempotent — and must paginate on a `(synced_at, id)`
+  keyset, never `synced_at` alone.
+- **`push_items` / `push_log_entries` are `security invoker`, `set search_path
+= ''`.** Invoker means RLS applies exactly as if the caller ran the SQL
+  themselves — no privilege escalation — and both still force
+  `user_id = auth.uid()` from the session, never from the payload, so a
+  caller can't push rows into someone else's account by forging a
+  `user_id` field. `search_path = ''` means every reference is
+  schema-qualified (`public.items`, `auth.uid()`); `pg_catalog` — where
+  `jsonb_array_elements`, `now()`, etc. live — stays implicitly searched
+  even with an empty path, so only table/function names outside it need
+  qualifying. `EXECUTE` on both is granted to `authenticated` only; the
+  `revoke all ... from public` line doesn't actually cover `anon` (Supabase
+  grants `anon` `EXECUTE` on new functions by default, independently of
+  `public`), so it's revoked from `anon` explicitly too — harmless either
+  way, since both raise when `auth.uid()` is null, but the SQL should say
+  what it means.
+- **The returned column is `row_id`, not `id`.** `plpgsql` implicitly
+  declares each `returns table` column as a variable, and a bare `id`
+  inside the function body is then ambiguous with the `items.id` /
+  `log_entries.id` columns referenced in the same statements —
+  `supabase db lint` caught this (`column reference "id" is ambiguous`)
+  before it ever ran. `row_id` sidesteps it instead of schema-qualifying
+  every column reference in every statement.
+- **Each row in a push batch is applied inside its own
+  `begin ... exception when others ... end`** and reported back
+  individually as `{row_id, accepted, reason}`, so one bad row — a failed
+  check constraint, a stale update, a missing parent item — never aborts
+  the rest of the batch or rolls back the whole call.
+- **Item-before-log-entry ordering and the FK.** The client is expected to
+  push items before their log entries (a later sync-engine phase), but a
+  batch can still race ahead of that — a superseded earlier batch, a
+  retry, simple reordering. Rather than let the `item_id` foreign key
+  raise and abort the whole `push_log_entries` call, the function checks
+  ownership up front with an `exists` query against `items` and reports
+  `reason = 'item_not_found'` for that one row, leaving the rest of the
+  batch unaffected. The sync engine can retry a rejected log entry once
+  its item has synced, rather than needing a strict global order. That
+  same check folds "item doesn't exist yet" and "item belongs to someone
+  else" into one rejection from the RPC — it does not hide whether an id
+  exists at all (`items.id` is a global primary key, so a colliding
+  `push_items` insert already reveals existence, just with a different
+  rejection reason); what it and the composite FK above actually prevent
+  is a log entry ending up attached to an item this caller doesn't own.
+- **`push_items`'s "newest wins" is enforced in the `on conflict ... do
+update ... where` clause**: `public.items.user_id = caller and
+excluded.updated_at > public.items.updated_at`. A stale incoming
+  `updated_at`, or an id that collides with a row owned by someone else,
+  makes the update affect zero rows, reported as
+  `reason = 'stale_or_not_owned'` rather than an error. The
+  `items_update_own` RLS policy enforces the same ownership boundary
+  independently underneath.
+  **Known gap, not fixed here:** this compares `updated_at` only, but the
+  client's `mergeItem` breaks a tie on equal `updated_at` by comparing
+  `reviewed_at`, then `archived_at`, then `deleted_at`, then a
+  `JSON.stringify` of the whole row — so on an exact `updated_at` tie with
+  different content, the server and a client's local merge can pick
+  different winners and never converge on their own (rare: needs identical
+  millisecond timestamps). Reproducing that exact chain in SQL isn't
+  practical — the `JSON.stringify` fallback has no SQL equivalent that
+  agrees with it row for row — so instead of a `WHERE` clause that only
+  partially agrees with `mergeItem`, Phase 4 should: when a push is
+  rejected as `stale_or_not_owned` for a row this user owns and the local
+  merge still prefers the local version, re-stamp its `updated_at` and push
+  again.
+- **Both tables are added to the `supabase_realtime` publication now**
+  (`alter publication supabase_realtime add table ...`), even though
+  nothing subscribes until Phase 6, so the migration set the plan asks
+  for is complete in one phase. RLS still applies to Realtime's
+  changefeed, so this doesn't expose anything cross-user by itself.
+- **`@supabase/supabase-js` is a runtime dependency** (`dependencies`, not
+  `devDependencies`) — the main process will need it starting Phase 3.
+- **Integration tests live under `test/integration/`** and run via
+  `npm run test:integration`; `npm test` now runs `test/*.test.js`
+  (non-recursive), so it stays fast and Docker-free while integration
+  tests in a subdirectory are excluded automatically.
+  `test/integration/sync.test.js` reads the local stack's URL and keys
+  fresh from `npx supabase status -o json` on every run (never
+  hardcoded), creates two throwaway users through the admin API with
+  per-run random passwords, and asserts: RLS isolation (including that B
+  cannot attach a log entry to A's item, directly or via the RPC); newest-
+  wins on `push_items`; the `synced_at` trigger and its use as a pull
+  cursor (using the server's own returned timestamps as the cursor, not
+  the test machine's clock); log-entry append-only/idempotent behaviour
+  (a re-push with changed content is rejected and the stored row is
+  unchanged); and that direct `UPDATE`/`DELETE` by the owner, where no
+  policy grants them, affect zero rows. Cleanup is centralised in the
+  suite's `after` hook, which deletes both users — the cascade removes
+  every row they created, so no test cleans up its own rows.
+
 ## Open items
 
 - Work data (people and projects at Octopus) would live in a personal Supabase

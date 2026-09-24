@@ -12,7 +12,8 @@
     "lint:fix": "eslint . --fix",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
-    "test": "node --test",
+    "test": "node --test test/*.test.js",
+    "test:integration": "node --test test/integration/*.test.js",
     "check": "npm run lint && npm run format:check && npm test",
     "prebuild": "npm run icon",
     "build": "electron-builder",
@@ -59,5 +60,8 @@
       ],
       "category": "Utility"
     }
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.117.1"
   }
 }
