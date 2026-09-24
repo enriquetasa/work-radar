@@ -15,6 +15,17 @@ const { createSyncEngine } = require('./sync/sync-engine');
 const { createRealtimeSync } = require('./sync/realtime');
 const { createSyncLifecycle } = require('./sync/sync-lifecycle');
 
+// Pins the userData folder explicitly. This already matches Electron's own
+// default in both a plain `electron .` dev run and a packaged build (
+// electron-builder 26 keeps `name: "work-radar"` in the packaged app's own
+// package.json, with no top-level `productName` — the `build` block is
+// stripped), so this is a no-op today — but setting it explicitly means a
+// future top-level `productName` (or any other change to how Electron
+// derives app.name) can never silently move users' data to a different
+// folder.
+app.setPath('userData', path.join(app.getPath('appData'), 'work-radar'));
+log.info('userData path resolved', { userData: app.getPath('userData') });
+
 const DATA_FILE = () => path.join(app.getPath('userData'), 'work-radar-data.json');
 const SYNC_STATE_FILE = () => path.join(app.getPath('userData'), 'sync-state.json');
 const BACKUP_DIR = () => path.join(app.getPath('userData'), 'backups');
