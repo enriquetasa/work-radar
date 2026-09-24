@@ -20,8 +20,24 @@ const log = require('../logger');
 // flag (see below) — it isn't part of the Supabase session at all, but the
 // renderer needs it to know "a sign-in is already in flight" across a
 // reload, rather than only from the one call that started it.
+//
+// `userId` rides along on the same status push as `signedIn` (found in
+// review — Phase 6): main.js's realtime subscribe used to read it
+// separately via its own async client.auth.getSession() call after the
+// fact, which opened a gap between "signed in" and "know the userId" that
+// a fast sign-out landing in between could fall into (subscribing realtime
+// for a session that had already ended, with no channel ever left leaked
+// for it to fix on its own — see sync/sync-lifecycle.js). Carrying it here
+// instead means every listener gets `signedIn` and `userId` atomically,
+// off the same session object onAuthStateChange/getSession already handed
+// this module — no extra network round trip, no gap to race.
 function toStatus(session, pending) {
-  return { signedIn: !!session, email: session?.user?.email ?? null, pending };
+  return {
+    signedIn: !!session,
+    email: session?.user?.email ?? null,
+    userId: session?.user?.id ?? null,
+    pending,
+  };
 }
 
 // `redirectTo` must exactly match the loopback callback URL that
@@ -50,7 +66,7 @@ function createAuthService({ client, waitForCallback, redirectTo, log: logger = 
     const { data, error } = await client.auth.getSession();
     if (error) {
       logger.warn('failed to read current session', { err: error });
-      return { signedIn: false, email: null, pending: signInPending };
+      return { signedIn: false, email: null, userId: null, pending: signInPending };
     }
     return toStatus(data.session, signInPending);
   }
@@ -84,7 +100,7 @@ function createAuthService({ client, waitForCallback, redirectTo, log: logger = 
         throw new Error('already signed in — sign out first');
       }
       logger.info('sign-in attempt started', { attemptId });
-      emit({ signedIn: false, email: null, pending: true });
+      emit({ signedIn: false, email: null, userId: null, pending: true });
       const pending = waitForCallback();
       // `pending.result` is only actually awaited further down, on the
       // path where binding succeeded and signInWithOtp didn't error —

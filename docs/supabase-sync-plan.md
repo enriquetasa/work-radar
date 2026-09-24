@@ -1243,6 +1243,252 @@ bookkeeping failed after the data write succeeded`, with the error) and
 the account-switch data-exposure caveat, and the flaky-under-load
 interval test) remain unchanged, for the same reasons already given.
 
+## Phase 6 notes (realtime)
+
+Implemented in `sync/realtime.js` (one more dependency-injected module,
+same split as `sync/auth-*`/`sync/sync-engine.js`) plus a few lines of
+wiring in `main.js`. No new migration — both tables were already added
+to the `supabase_realtime` publication in Phase 2, specifically so this
+phase would be complete in one pass.
+
+- **A realtime event never merges its own payload — it only calls
+  `syncEngine.triggerNow()`**, exactly as the plan's own Phase 6 line
+  says: "each event triggers a normal pull (rather than trusting the
+  payload), so there is a single ingest path." `sync/realtime.js` reads
+  nothing off a `postgres_changes` payload beyond its `eventType`, for
+  logging — the row itself is always fetched by the ordinary pull path
+  (`pullItemsAndMerge`/`pullLogEntriesAndMerge`) that already handles the
+  lookback window, keyset pagination, the items-before-log-entries
+  ordering and the domain merge. This is also what keeps Realtime
+  optional at the row level: a dropped or out-of-order event never loses
+  data, because nothing here trusts an event to carry the actual change
+  — it's just a "something changed, pull now" nudge, same shape as the
+  60s interval or a window focus.
+- **Reuses the one supabase-js client `main.js` already built for
+  auth/sync** (`buildRealtimeSync(built.client, syncEngine)`), not a
+  second connection. This is what satisfies "the realtime socket uses
+  the user's access token and stays authorized across token refreshes"
+  for free: supabase-js's own `SupabaseClient` wires
+  `auth.onAuthStateChange` to `realtime.setAuth(accessToken)`
+  internally, so a token refresh on the shared client re-authorizes the
+  same socket this module subscribed on — `sync/realtime.js` has no
+  token-handling code of its own at all.
+- **RLS applies to the changefeed, so the subscription has no explicit
+  per-user filter.** `subscribe(userId)` registers plain
+  `{ event: '*', schema: 'public', table: 'items' }` /
+  `table: 'log_entries'` handlers — Realtime only ever delivers rows
+  this connection's own RLS policies already let it `select`, per the
+  `add_tables_to_realtime_publication` migration's own comment. `userId`
+  is only used for the channel's topic name and structured-log context,
+  never as a security boundary.
+- **One channel, correlated by a `channelId` (`crypto.randomUUID()`)**,
+  the same pattern as `auth-service.js`'s `attemptId` and
+  `sync-engine.js`'s `cycleId` — every log line one subscription
+  produces (subscribe, SUBSCRIBED, an event, a status change,
+  unsubscribe) carries it alongside `userId`, so overlapping or
+  successive subscriptions (a quick sign-out/sign-in) can be told apart
+  in the logs.
+- **On `SUBSCRIBED`, one catch-up pull** — "anything missed while
+  disconnected" per the plan, using the same `triggerNow()` as every
+  other trigger, not a special "resync" path. On `CHANNEL_ERROR` /
+  `TIMED_OUT` / `CLOSED`, the status is logged (`warn`, or `debug` for a
+  `CLOSED` this module itself asked for via `unsubscribe()`) and nothing
+  else — no manual reconnect/retry loop is built on top of
+  supabase-js's own reconnect, and the sync engine's existing 60s
+  interval is the safety net if a socket never recovers, exactly as the
+  plan specifies.
+- **Lifecycle mirrors `syncEngine.start()`/`stop()`, but is gated on the
+  transition, not every auth event — now owned by `sync/sync-lifecycle.js`,
+  not inline in `main.js`.** `authService.onChange` pushes every status to
+  `syncLifecycle.handleAuthStatus()`, which calls `engine.start()`/`stop()`
+  on every auth state change (idempotent, so safe to call repeatedly — see
+  the Phase 4-5 notes) — including an hourly `TOKEN_REFRESHED` event that
+  still reports `signedIn: true`. `realtime.subscribe()` is not idempotent
+  the same way: calling it again tears down and rebuilds the channel, so
+  it's only called on the `wasRunning -> running` transition (a local
+  `wasRunning` flag inside the lifecycle module, captured before its own
+  `running` flag is set), not on every `signedIn` event — found while
+  wiring this phase, before it ever shipped, by noticing the token-refresh
+  event would otherwise cause needless channel churn every hour.
+  `unsubscribe()` runs from the existing sign-out branch
+  (`else if (running)`), so it runs exactly once per sign-out, same as
+  `engine.stop()`.
+  **Extracted out of `main.js` into its own module after a round of
+  review** found a real bug in the inline version: `realtime.subscribe()`
+  needs the signed-in user's id, which `authService`'s status push didn't
+  used to carry — `main.js` resolved it with its own extra
+  `client.auth.getSession()` call, made _after_ deciding to subscribe, in
+  a `.then()` with nothing re-checking that the session was still signed
+  in by the time it resolved. A sign-out landing in that gap (auth-js
+  serialises `getSession()` behind its own lock, so a same-tick sign-out
+  can still resolve after it) ran the sign-out branch — `syncEngine.stop()`
+  and a no-op `unsubscribe()`, since no channel existed yet — and then the
+  stale `.then()` went ahead and subscribed anyway, opening a channel while
+  signed out that stayed open (logged as a warning) until the next
+  sign-in replaced it. The fix removes the gap rather than closing it:
+  `sync/auth-service.js`'s `toStatus()` now puts `userId` on the very same
+  status object that carries `signedIn` (straight off the session
+  `onAuthStateChange`/`getSession` already read — no extra network call),
+  so `handleAuthStatus()` subscribes synchronously off that one object.
+  There's no async read left in between to race, so no generation counter
+  or re-check is needed either. Covered by `test/sync-lifecycle.test.js`
+  (a signedIn status immediately followed by a signedOut one leaves no
+  subscription open, and a repeated signedIn — standing in for
+  `TOKEN_REFRESHED` — doesn't re-subscribe) and
+  `test/sync-auth-service.test.js` (`userId` travels on `getStatus()` and
+  every `onChange` push).
+  **The lifecycle also tracks the `userId` it last subscribed for**, so a
+  `signedIn` status pushed while already running — the
+  `wasRunning -> running` transition already handled above being the
+  _only_ other case — re-subscribes when that status's `userId` differs from the one
+  realtime currently has a channel open for, rather than silently
+  keeping the old user's topic and log context (found in review; nothing
+  in today's `auth-service.js` can produce this, since `signIn()` refuses
+  while a session already exists, but the lifecycle's own contract
+  shouldn't rely on that holding forever). This also covers a `signedIn`
+  status that first arrives with no `userId` at all (the defensive case
+  two paragraphs up): a later status that does carry one now subscribes
+  then, instead of waiting for a sign-out/sign-in cycle. Covered by
+  `test/sync-lifecycle.test.js` (`signedIn(user-1)` followed by
+  `signedIn(user-2)` while running, and a no-`userId` `signedIn` followed
+  by one that carries a `userId`).
+  **`subscribedUserId` is only set once `realtime.subscribe()` actually
+  succeeds**, not before it's called — found in review: setting it first
+  meant a throwing `subscribe()` (e.g. `client.channel()`/`.on()` itself
+  failing) left the lifecycle believing it was already subscribed, so no
+  later `signedIn` status would ever retry it for that session, and the
+  exception itself escaped `handleAuthStatus()` to be caught only by
+  `auth-service.js`'s generic "auth state change listener threw" log,
+  which carries no `userId`. `subscribeFor()` now wraps the call in its
+  own try/catch, logging `{ userId, err }` on failure — `engine.start()`
+  is unaffected (sync itself still runs), and because `subscribedUserId`
+  stays unset, the next `signedIn` event for that user (a later
+  `TOKEN_REFRESHED`, say) retries the subscribe instead of silently
+  giving up on it. Covered by `test/sync-lifecycle.test.js` (a throwing
+  `subscribe()` is caught and logged with `userId` context without
+  marking the user subscribed, and a following `signedIn` for the same
+  user retries it).
+- **No leaked channels on re-sign-in or an account switch — and every
+  subscription gets its own topic, not one fixed per user.** `subscribe()`
+  itself tears down and removes any channel it finds already open first
+  (logged as a warning, since normal lifecycle never hits this path), and
+  every event/status callback also closes over its own `entry` object and
+  checks `current !== entry` before doing anything, so a straggling
+  event from a channel that has since been replaced or torn down can
+  never trigger a pull for a session that isn't current any more — but a
+  per-user topic (`work-radar-sync:${userId}`) was found in review to
+  still be unsafe on its own: `removeChannel()`'s leave is async, so a
+  channel this module just started tearing down stays registered on the
+  shared client — and reusable by `client.channel()` for that same
+  topic — until the server acks it. A second `subscribe()` for the same
+  user landing in that window (a fast sign-out/sign-in, or a degraded
+  network delaying the first leave) got back that same still-leaving
+  channel; real `@supabase/realtime-js` then silently drops the new
+  subscription's `postgres_changes` bindings as duplicates of the old
+  ones (the server collapses identical filters) and no-ops its
+  `.subscribe()` call too (only a closed channel's `subscribe()` actually
+  registers a callback) — leaving the new session with a dead channel:
+  no catch-up pull, no events, and nothing logged. The topic is now
+  `work-radar-sync:${userId}:${channelId}`, so `client.channel()` never
+  sees a repeat topic to hand back in the first place, regardless of how
+  slowly an old leave completes. `test/sync-realtime.test.js`'s fake
+  client now mirrors all three of the real client's behaviours above
+  (topic reuse while a channel is still open, the `postgres_changes`
+  filter dedup, and the closed-only `subscribe()` guard — verified
+  against the installed `@supabase/realtime-js` source), and a dedicated
+  test subscribes for the same user twice without awaiting the first
+  teardown and asserts the second subscription still receives events.
+- **`client.removeChannel()` (async, can reject or resolve `'timed out'`)
+  has its promise followed through and logged, not fire-and-forgotten** —
+  `unsubscribe()` itself stays synchronous (mirroring `syncEngine.stop()`),
+  but the teardown it kicks off is followed through: a non-`'ok'` result
+  or a thrown error is logged with the same `userId`/`channelId` context
+  rather than silently swallowed. supabase-js's own `removeChannel()`
+  only calls `channel.teardown()` on an `'ok'` leave (a `'timed out'`
+  closes the channel locally on its own, but any other non-`'ok'` result
+  leaves it neither torn down nor removed) — found in review, so a
+  non-`'ok'` result now also calls `entry.channel.teardown()` itself,
+  inside a try/catch that logs a teardown failure as its own error rather
+  than letting it escape. All three outcomes (`'ok'`, a non-`'ok'` result,
+  and a rejection) are covered directly (`test/sync-realtime.test.js`'s
+  fake `removeChannel` is injectable per test, and its fake channel's
+  `teardown()` can be made to throw), rather than only ever exercising
+  the happy path.
+- **Every local push this machine makes also comes back to it as a
+  `postgres_changes` event on its own channel**, since RLS lets this
+  connection select the row it just wrote — payloads are ignored (see
+  above), so each local push cycle is followed by an extra full pull
+  cycle finding nothing new. At sign-in, the `SUBSCRIBED` catch-up also
+  runs right after `syncEngine.start()`'s own startup trigger, so two
+  cycles run back to back. Not a correctness bug — `triggerNow()`
+  coalesces overlapping calls, and a pull never pushes — but it roughly
+  doubles the cycle count for an active user. Left as a known trade-off
+  rather than fixed this round: if it matters later, a short debounce on
+  `onChange` (reusing the engine's existing debounce machinery) is
+  cheaper than trying to distinguish "my own echo" from someone else's
+  change without reading the payload, which would give up the single
+  ingest path this design is built around.
+- **Unit tests** (`test/sync-realtime.test.js`) fake the supabase-js
+  client/channel (`.channel()`/`.on()`/`.subscribe()`/`removeChannel()`)
+  the same way `test/sync-engine.test.js` fakes the four push/pull
+  functions rather than mocking the real PostgREST/Realtime client —
+  covering both-table subscription (asserting the exact
+  `{ event: '*', schema: 'public', table }` binding for each table, not
+  just the channel topic), payload-blind event routing, catch-up-on-SUBSCRIBED, silent
+  (non-retrying) handling of CHANNEL_ERROR/TIMED_OUT/CLOSED, the debug-
+  not-warning distinction for a CLOSED this module asked for itself via
+  `unsubscribe()` versus an unexpected one (found in review: the
+  `entry.closing` branch existed but was unreachable — `current !== entry`
+  was checked first and was already true by the time a real CLOSED could
+  arrive — so this is now checked ahead of that guard, with its own
+  test), unsubscribe cutting off further events, the no-leak
+  re-subscribe case above, an
+  `onChange` rejection being caught and logged instead of thrown, both
+  non-`'ok'` and rejecting `removeChannel()` teardown outcomes, and the
+  required-argument guards on `createRealtimeSync`/`subscribe`. No test
+  leaves a subscription open past its own body — every test either never
+  needed `unsubscribe()` (a plain fake object, not a real timer/socket)
+  or calls it directly; there's nothing here yet needing a `finally` the
+  way `sync-engine.test.js`'s real debounce/retry timers do, since the
+  fake channel holds no timers of its own. `test/sync-lifecycle.test.js`
+  covers the transition logic itself (see the bullet above) with fake
+  `engine`/`realtime` objects, the same style.
+- **Integration tests** (`test/integration/sync-realtime.test.js`) run
+  two real engines against local Supabase, same "two machines, one
+  account" shape as `test/integration/sync-engine.test.js`, but machine
+  B's `intervalMs` is set to 24 hours (never fires within a test) and
+  `engine.start()` is never called for it at all — the only thing that
+  can make machine B pull is a real `sync/realtime.js` subscription
+  wired to `engine.triggerNow()`, exactly as `main.js` wires it. Asserts
+  a plain item created (and pushed) on machine A arrives on machine B
+  through a realtime-triggered pull, and separately that a log entry
+  added to an item both machines already share does too. Both tests wait
+  for the `SUBSCRIBED` catch-up cycle to actually settle (not just start)
+  before machine A writes, and re-push (a fresh `updatedAt`/log-entry id,
+  a genuine outbox change, never a no-op re-send) if machine B still
+  hasn't seen the change on a later poll — `realtime-js` can report
+  `SUBSCRIBED` slightly before the server-side replication slot is fully
+  attached, which can otherwise drop the first change published right
+  after subscribe and time out at 15s with no clear cause. Each test's
+  `finally` block `unsubscribe()`s, stops **both** machines' engines
+  (machine A's too, not just machine B's under test — found in review:
+  every `pushRtA()`/`pushLogEntry()` call arms machine A's own 3s
+  `saveDebounceMs` timer via `recordLocalSave()`, and the last one
+  otherwise outlives the test, possibly firing during the next test or
+  while `after()` is mid-deleting the shared user) and awaits its own
+  last realtime-triggered cycle (so a late one can't still be running
+  against a deleted user after `after()`), then calls
+  `client.realtime.disconnect()` for both machines' clients — an open
+  realtime websocket (unlike a fake channel) keeps the test process alive
+  past the last assertion otherwise. `wireRealtime()`'s `state.lastCycle`
+  is chained onto its own previous value
+  (`state.lastCycle = state.lastCycle.then(() => engine.triggerNow())`)
+  rather than reassigned outright — found in review: `triggerNow()` only
+  sets a rerun flag and resolves immediately when a cycle is already running,
+  so a bare reassignment could otherwise adopt an already-settled
+  promise while the real cycle it triggered was still in flight, making
+  the `finally` block's await a no-op just when it matters most.
+
 ## Open items
 
 - Work data (people and projects at Octopus) would live in a personal Supabase

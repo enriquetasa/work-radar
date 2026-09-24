@@ -12,6 +12,8 @@ const { createAuthService } = require('./sync/auth-service');
 const { waitForCallback, REDIRECT_TO } = require('./sync/callback-server');
 const { isValidEmail } = require('./sync/validate');
 const { createSyncEngine } = require('./sync/sync-engine');
+const { createRealtimeSync } = require('./sync/realtime');
+const { createSyncLifecycle } = require('./sync/sync-lifecycle');
 
 const DATA_FILE = () => path.join(app.getPath('userData'), 'work-radar-data.json');
 const SYNC_STATE_FILE = () => path.join(app.getPath('userData'), 'sync-state.json');
@@ -32,13 +34,25 @@ let authService = null;
 // only ever start()ed while a session is actually signed in — see
 // authService.onChange() below. data:save (below) routes through the
 // engine's save-race-safe recordLocalSave whenever `syncEngine` exists at
-// all, not only while `syncEngineRunning` — the merge needs no signed-in
+// all, not only while it's actively running — the merge needs no signed-in
 // user, only recordLocalSave's own outbox bookkeeping does, and that
-// already degrades gracefully without one. `syncEngineRunning` is used
-// only to gate calls that really do need the engine to be actively
-// cycling (triggerNow() on focus, sync:status).
+// already degrades gracefully without one. `syncLifecycle.isRunning()` is
+// read directly (no separate module-level flag — found in review: two
+// copies of "is sync running" can silently drift) to gate calls that
+// really do need the engine to be actively cycling (triggerNow() on
+// focus, sync:status).
 let syncEngine = null;
-let syncEngineRunning = false;
+// Realtime sync trigger (Phase 6 — see sync/realtime.js and
+// docs/supabase-sync-plan.md's Phase 6 notes). Built once alongside
+// syncEngine, sharing the same client, but only ever subscribe()d while
+// signed in, on the same transition that starts the sync engine — see
+// syncLifecycle below.
+let realtimeSync = null;
+// Owns the "start/stop the engine, subscribe/unsubscribe realtime" auth-
+// status transition logic (see sync/sync-lifecycle.js) — extracted out
+// of this file (found in review) so it's unit-testable without
+// Electron. Built once alongside syncEngine/realtimeSync.
+let syncLifecycle = null;
 
 /* ---------- JSON helpers ---------- */
 async function readJSON(file) {
@@ -122,8 +136,9 @@ ipcMain.handle('data:save', async (_e, data) => {
       // does this phase's outbox diffing (never trusts the renderer to
       // report what changed) and schedules a debounced push.
       //
-      // Gated on `syncEngine` existing at all, not `syncEngineRunning`
-      // (found in review): the merge itself needs no signed-in user —
+      // Gated on `syncEngine` existing at all, not on whether it's
+      // running (found in review): the merge itself needs no signed-in
+      // user —
       // only recordLocalSave's own outbox bookkeeping does, and that
       // already skips gracefully when there isn't one — so routing
       // through it whenever the engine exists keeps every write to this
@@ -285,6 +300,20 @@ function buildSyncEngine(client) {
   });
 }
 
+// Builds the realtime sync trigger (Phase 6), sharing the same
+// supabase-js client as auth/sync rather than opening a second
+// connection — this is also what keeps the realtime socket authorized
+// across token refreshes, since the client's own
+// auth.onAuthStateChange -> realtime.setAuth wiring runs regardless of
+// who else is using the client (see sync/realtime.js's own doc
+// comment). `onChange` is wired straight to the sync engine's existing
+// coalescing trigger — a realtime event never merges its own payload,
+// it just means "pull now", the same as the 60s interval or a window
+// focus.
+function buildRealtimeSync(client, engine) {
+  return createRealtimeSync({ client, onChange: () => engine.triggerNow() });
+}
+
 ipcMain.handle('sync:status', async () => {
   // The only way the renderer can learn the current sync status other
   // than waiting for the next 'sync:stateChanged' push — needed because
@@ -294,7 +323,7 @@ ipcMain.handle('sync:status', async () => {
   // dedupes identical statuses, so a "synced" pushed once before anyone
   // was listening then never gets pushed again. Sync.init() calls this
   // once on load/reload, the same way Auth.init() calls authStatus().
-  return syncEngineRunning ? syncEngine.getStatus() : null;
+  return syncLifecycle && syncLifecycle.isRunning() ? syncEngine.getStatus() : null;
 });
 
 ipcMain.handle('auth:status', async () => {
@@ -443,7 +472,7 @@ async function createWindow() {
     // it) — without a .catch, anything that throws outside runCycle's own
     // try/catch (e.g. getUserId()/now() themselves) becomes an unhandled
     // rejection with no cycleId context (found in review).
-    if (syncEngineRunning) {
+    if (syncLifecycle && syncLifecycle.isRunning()) {
       syncEngine.triggerNow().catch((err) => log.error('sync focus trigger failed', { err }));
     }
   });
@@ -463,17 +492,19 @@ app.whenReady().then(async () => {
   if (built) {
     authService = built.service;
     syncEngine = buildSyncEngine(built.client);
+    realtimeSync = buildRealtimeSync(built.client, syncEngine);
+    syncLifecycle = createSyncLifecycle({ engine: syncEngine, realtime: realtimeSync });
     authService.onChange((status) => {
       if (win) win.webContents.send('auth:stateChanged', status);
-      // Sync only ever runs while signed in (see docs/supabase-sync-plan.md's
-      // "Local-first" note) — start()/stop() are both idempotent, so this
-      // fires safely on every auth state change, not just the transitions.
-      if (status.signedIn) {
-        syncEngineRunning = true;
-        syncEngine.start();
-      } else if (syncEngineRunning) {
-        syncEngineRunning = false;
-        syncEngine.stop();
+      // All the start/stop/subscribe/unsubscribe transition logic lives
+      // in sync/sync-lifecycle.js now (found in review — see its own
+      // doc comment for the subscribe-after-sign-out race this closes).
+      // Other handlers in this file (sync:status, the focus trigger
+      // below) read `syncLifecycle.isRunning()` directly rather than a
+      // second, hand-synced module-level flag (found in review).
+      const wasRunning = syncLifecycle.isRunning();
+      syncLifecycle.handleAuthStatus(status);
+      if (wasRunning && !syncLifecycle.isRunning()) {
         // Hide the status indicator on sign-out — a signed-out state
         // shows no sync UI at all, per the plan.
         if (win) win.webContents.send('sync:stateChanged', { state: null });

@@ -173,7 +173,12 @@ test('full sign-in flow: signInWithOtp -> Mailpit -> loopback redirect -> sessio
   await signInPromise;
 
   const status = await service.getStatus();
-  assert.deepEqual(status, { signedIn: true, email, pending: false });
+  assert.deepEqual(status, {
+    signedIn: true,
+    email,
+    userId: created.user.id,
+    pending: false,
+  });
 
   // Persisted via the fake encryptor: the raw file must not be
   // plaintext, and manually decrypting it must reveal a real session.
@@ -210,5 +215,10 @@ test('full sign-in flow: signInWithOtp -> Mailpit -> loopback redirect -> sessio
   // with no further network round trip needed.
   const { service: restoredService } = buildService(sessionFile);
   const restoredStatus = await restoredService.getStatus();
-  assert.deepEqual(restoredStatus, { signedIn: true, email, pending: false });
+  assert.deepEqual(restoredStatus, {
+    signedIn: true,
+    email,
+    userId: created.user.id,
+    pending: false,
+  });
 });

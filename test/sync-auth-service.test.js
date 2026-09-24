@@ -119,7 +119,12 @@ test('getStatus reports signed out and not pending when there is no session', as
     redirectTo: 'http://127.0.0.1:54390/auth/callback',
     log: silentLog,
   });
-  assert.deepEqual(await service.getStatus(), { signedIn: false, email: null, pending: false });
+  assert.deepEqual(await service.getStatus(), {
+    signedIn: false,
+    email: null,
+    userId: null,
+    pending: false,
+  });
 });
 
 test('getStatus reports the signed-in email when a session exists', async () => {
@@ -139,8 +144,42 @@ test('getStatus reports the signed-in email when a session exists', async () => 
   assert.deepEqual(await service.getStatus(), {
     signedIn: true,
     email: 'me@example.com',
+    userId: null,
     pending: false,
   });
+});
+
+// New: the whole point of carrying userId on the status is that a
+// realtime subscribe (main.js/sync/sync-lifecycle.js) can use it directly
+// off this same push instead of a separate getSession() read — see
+// toStatus()'s own doc comment above (found in review — Phase 6).
+test('getStatus and onChange both carry the signed-in session userId', async () => {
+  const { client, fireChange } = makeFakeClient({
+    getSession: async () => ({
+      data: { session: { user: { id: 'user-abc', email: 'me@example.com' } } },
+      error: null,
+    }),
+  });
+  const { waitForCallback } = fakeWaitForCallback({ resultValue: { code: 'unused' } });
+  const service = createAuthService({
+    client,
+    waitForCallback,
+    redirectTo: 'http://127.0.0.1:54390/auth/callback',
+    log: silentLog,
+  });
+  assert.deepEqual(await service.getStatus(), {
+    signedIn: true,
+    email: 'me@example.com',
+    userId: 'user-abc',
+    pending: false,
+  });
+
+  const seen = [];
+  service.onChange((status) => seen.push(status));
+  fireChange('SIGNED_IN', { user: { id: 'user-xyz', email: 'other@example.com' } });
+  assert.deepEqual(seen, [
+    { signedIn: true, email: 'other@example.com', userId: 'user-xyz', pending: false },
+  ]);
 });
 
 test('getStatus treats a getSession error as signed-out rather than throwing', async () => {
@@ -154,7 +193,12 @@ test('getStatus treats a getSession error as signed-out rather than throwing', a
     redirectTo: 'http://127.0.0.1:54390/auth/callback',
     log: silentLog,
   });
-  assert.deepEqual(await service.getStatus(), { signedIn: false, email: null, pending: false });
+  assert.deepEqual(await service.getStatus(), {
+    signedIn: false,
+    email: null,
+    userId: null,
+    pending: false,
+  });
 });
 
 test('signIn runs signInWithOtp -> waitForCallback -> exchangeCodeForSession in order', async () => {
@@ -215,13 +259,23 @@ test('signIn reports pending:true (and no email) as soon as it starts', async ()
   service.onChange((status) => seen.push(status));
   const signInPromise = service.signIn('person@example.com');
 
-  assert.deepEqual(await service.getStatus(), { signedIn: false, email: null, pending: true });
-  assert.deepEqual(seen[0], { signedIn: false, email: null, pending: true });
+  assert.deepEqual(await service.getStatus(), {
+    signedIn: false,
+    email: null,
+    userId: null,
+    pending: true,
+  });
+  assert.deepEqual(seen[0], { signedIn: false, email: null, userId: null, pending: true });
 
   c.resolveListening();
   c.resolveResult({ code: 'x', flowId: null });
   await signInPromise;
-  assert.deepEqual(await service.getStatus(), { signedIn: false, email: null, pending: false });
+  assert.deepEqual(await service.getStatus(), {
+    signedIn: false,
+    email: null,
+    userId: null,
+    pending: false,
+  });
 });
 
 test('signIn binds the loopback listener before calling signInWithOtp, and never sends the email if binding fails', async () => {
@@ -353,9 +407,9 @@ test('signIn (failure path) pushes the settled pending:false status after the re
   service.onChange((status) => order.push({ push: status }));
   await service.signIn('person@example.com').catch((err) => order.push({ rejected: err.message }));
   assert.deepEqual(order, [
-    { push: { signedIn: false, email: null, pending: true } },
+    { push: { signedIn: false, email: null, userId: null, pending: true } },
     { rejected: 'rate limited' },
-    { push: { signedIn: false, email: null, pending: false } },
+    { push: { signedIn: false, email: null, userId: null, pending: false } },
   ]);
 });
 
@@ -392,6 +446,7 @@ test('signIn (success path) pushes the settled signedIn:true status after resolv
   assert.deepEqual(seen[seen.length - 1], {
     signedIn: true,
     email: 'me@example.com',
+    userId: null,
     pending: false,
   });
 });
@@ -523,13 +578,15 @@ test('onChange forwards auth state changes and unsubscribing stops future calls'
   const off = service.onChange((status) => seen.push(status));
 
   fireChange('SIGNED_IN', { user: { email: 'me@example.com' } });
-  assert.deepEqual(seen, [{ signedIn: true, email: 'me@example.com', pending: false }]);
+  assert.deepEqual(seen, [
+    { signedIn: true, email: 'me@example.com', userId: null, pending: false },
+  ]);
 
   off();
   fireChange('SIGNED_OUT', null);
   assert.deepEqual(
     seen,
-    [{ signedIn: true, email: 'me@example.com', pending: false }],
+    [{ signedIn: true, email: 'me@example.com', userId: null, pending: false }],
     'no call after unsubscribing'
   );
 });
