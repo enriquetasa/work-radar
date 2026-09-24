@@ -105,75 +105,84 @@
           <form id="form-panel" hidden>
             <h2 id="form-label">New project</h2>
             <div id="form-fields">
-              <label for="f-name">Project name <span class="required">*</span></label
-              ><input id="f-name" required autocomplete="off" placeholder="PROJECT / DESIGNATION" />
-              <label for="f-cat">Category</label
-              ><input id="f-cat" autocomplete="off" placeholder="Team, area, or personal" />
-              <div class="form-row" role="group" aria-label="Project status">
-                <span class="form-row-label">Status</span
-                ><button type="button" class="seg-btn" data-group="status" data-val="active">
-                  Active</button
-                ><button type="button" class="seg-btn" data-group="status" data-val="watch">
-                  Watch</button
-                ><button type="button" class="seg-btn" data-group="status" data-val="dormant">
-                  Dormant
-                </button>
-              </div>
-              <div class="form-row" role="group" aria-label="Project priority">
-                <span class="form-row-label">Priority</span
-                ><button type="button" class="seg-btn" data-group="priority" data-val="critical">
-                  Critical</button
-                ><button type="button" class="seg-btn" data-group="priority" data-val="high">
-                  High</button
-                ><button type="button" class="seg-btn" data-group="priority" data-val="medium">
-                  Medium</button
-                ><button type="button" class="seg-btn" data-group="priority" data-val="low">
-                  Low
-                </button>
-              </div>
-              <div class="field-grid">
-                <div>
-                  <label for="f-rhythm">Review rhythm</label
-                  ><select id="f-rhythm">
-                    <option value="3">Every 3 days</option>
-                    <option value="7">Weekly</option>
-                    <option value="14">Every 2 weeks</option>
-                    <option value="30">Every 30 days</option>
-                    <option value="custom">Custom interval</option>
-                    <option value="manual">Only when scheduled</option>
-                  </select>
+              <div class="project-fields">
+                <label for="f-name">Project name <span class="required">*</span></label
+                ><input
+                  id="f-name"
+                  required
+                  autocomplete="off"
+                  placeholder="PROJECT / DESIGNATION"
+                />
+                <label for="f-cat">Category</label
+                ><input id="f-cat" autocomplete="off" placeholder="Team, area, or personal" />
+                <div class="form-row" role="group" aria-label="Project status">
+                  <span class="form-row-label">Status</span
+                  ><button type="button" class="seg-btn" data-group="status" data-val="active">
+                    Active</button
+                  ><button type="button" class="seg-btn" data-group="status" data-val="watch">
+                    Watch</button
+                  ><button type="button" class="seg-btn" data-group="status" data-val="dormant">
+                    Dormant
+                  </button>
                 </div>
-                <div id="custom-rhythm" hidden>
-                  <label for="f-interval">Every (days)</label
-                  ><input id="f-interval" type="number" min="1" max="3650" step="1" value="14" />
+                <div class="form-row" role="group" aria-label="Project priority">
+                  <span class="form-row-label">Priority</span
+                  ><button type="button" class="seg-btn" data-group="priority" data-val="critical">
+                    Critical</button
+                  ><button type="button" class="seg-btn" data-group="priority" data-val="high">
+                    High</button
+                  ><button type="button" class="seg-btn" data-group="priority" data-val="medium">
+                    Medium</button
+                  ><button type="button" class="seg-btn" data-group="priority" data-val="low">
+                    Low
+                  </button>
                 </div>
-                <div>
-                  <label for="f-review">Next review</label
-                  ><input id="f-review" type="date" aria-describedby="review-help" />
-                </div>
+                <label for="f-notes">Notes</label
+                ><textarea id="f-notes" placeholder="INTEL / NOTES (optional)" rows="3"></textarea>
               </div>
-              <p id="review-help" class="field-help">
-                Leave the date blank to use the review rhythm.
-              </p>
-              <label for="f-waiting">Waiting on</label
-              ><input
-                id="f-waiting"
-                autocomplete="off"
-                placeholder="A person, team, or event (optional)"
-              />
-              <label for="f-checkpoint">Next checkpoint</label
-              ><input
-                id="f-checkpoint"
-                autocomplete="off"
-                placeholder="What are you expecting to happen?"
-              />
-              <label for="f-checkpoint-date">Checkpoint / follow-up date</label
-              ><input id="f-checkpoint-date" type="date" aria-describedby="checkpoint-help" />
-              <p id="checkpoint-help" class="field-help">
-                Surfaces in Today when due, until you complete or reschedule it.
-              </p>
-              <label for="f-notes">Notes</label
-              ><textarea id="f-notes" placeholder="INTEL / NOTES (optional)" rows="3"></textarea>
+              <div class="schedule-fields">
+                <div class="field-grid">
+                  <div>
+                    <label for="f-rhythm">Review rhythm</label
+                    ><select id="f-rhythm">
+                      <option value="3">Every 3 days</option>
+                      <option value="7">Weekly</option>
+                      <option value="14">Every 2 weeks</option>
+                      <option value="30">Every 30 days</option>
+                      <option value="custom">Custom interval</option>
+                      <option value="manual">Only when scheduled</option>
+                    </select>
+                  </div>
+                  <div id="custom-rhythm" hidden>
+                    <label for="f-interval">Every (days)</label
+                    ><input id="f-interval" type="number" min="1" max="3650" step="1" value="14" />
+                  </div>
+                  <div>
+                    <label for="f-review">Next review</label
+                    ><input id="f-review" type="date" aria-describedby="review-help" />
+                  </div>
+                </div>
+                <p id="review-help" class="field-help">
+                  Leave the date blank to use the review rhythm.
+                </p>
+                <label for="f-waiting">Waiting on</label
+                ><input
+                  id="f-waiting"
+                  autocomplete="off"
+                  placeholder="A person, team, or event (optional)"
+                />
+                <label for="f-checkpoint">Next checkpoint</label
+                ><input
+                  id="f-checkpoint"
+                  autocomplete="off"
+                  placeholder="What are you expecting to happen?"
+                />
+                <label for="f-checkpoint-date">Checkpoint / follow-up date</label
+                ><input id="f-checkpoint-date" type="date" aria-describedby="checkpoint-help" />
+                <p id="checkpoint-help" class="field-help">
+                  Surfaces in Today when due, until you complete or reschedule it.
+                </p>
+              </div>
             </div>
             <div id="form-actions">
               <button type="button" class="form-act" id="form-abort">Cancel</button

@@ -927,3 +927,67 @@ label {
     max-height: 70%;
   }
 }
+
+/* Direct editing in All keeps the existing terminal components and gives
+   the form the available workspace instead of the detail panel's height. */
+.contact-list-entry {
+  display: flex;
+  align-items: stretch;
+}
+.contact-list-entry .contact-row {
+  flex: 1;
+  min-width: 0;
+}
+.project-edit {
+  flex-shrink: 0;
+  align-self: center;
+  margin: 0 16px 0 8px;
+}
+.project-fields,
+.schedule-fields {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+#body.editing-project #list-panel {
+  display: none;
+}
+#body.editing-project #inspector {
+  flex: 1;
+  min-height: 0;
+  max-height: none;
+  overflow: hidden;
+}
+#body.editing-project #form-panel {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  border-bottom: 0;
+}
+#body.editing-project #form-label,
+#body.editing-project #form-actions {
+  flex-shrink: 0;
+}
+#body.editing-project #form-fields {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 16px;
+  align-content: start;
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 2px 2px 8px;
+}
+#body.editing-project #f-notes {
+  min-height: 140px;
+}
+#body.editing-project #form-actions {
+  border-top: 1px solid #1a5c2c;
+  padding-top: 8px;
+}
+@media (max-width: 680px) {
+  #body.editing-project #form-fields {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

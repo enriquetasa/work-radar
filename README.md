@@ -234,6 +234,10 @@ in Today, and an empty briefing means nothing is scheduled for attention.
 
 **All** contains every live project, with search, status filters, sorting, and access to
 the archive. Select a project to see its notes, activity history, and review controls.
+In All, each row also has an **Edit** button that opens the full project editor directly.
+The editor uses two columns on larger windows and one on smaller windows, with Save and Cancel
+always visible. Saving or cancelling returns to the same filtered list and scroll position.
+`Ctrl/Cmd+Enter` saves while editing; `Esc` cancels. Project editing is available only in All.
 The dark radar aesthetic remains, with a compact header and no spatial radar graphic.
 
 Projects can have a review rhythm (a number of days, or manual review), a specific next

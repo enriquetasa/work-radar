@@ -649,10 +649,8 @@ function renderDetail() {
         'Reviewing resets this rhythm. Checkpoints stay open until completed.'
       )
     );
-    actions.append(
-      button('Edit project', () => openEdit(it)),
-      button('Archive', () => Actions.archive(it.id), 'quiet')
-    );
+    if (Store.ui.view === 'all') actions.append(button('Edit project', () => openEdit(it)));
+    actions.append(button('Archive', () => Actions.archive(it.id), 'quiet'));
   } else {
     actions.append(
       button('Restore', () => Actions.restore(it.id)),
@@ -702,7 +700,7 @@ function renderDetail() {
 }
 function renderList() {
   const list = document.getElementById('list');
-  list.querySelectorAll('.contact-row').forEach((el) => el.remove());
+  list.querySelectorAll('.contact-row, .contact-list-entry').forEach((el) => el.remove());
   const items = visibleList();
   const empty = document.getElementById('empty-msg');
   empty.hidden = items.length > 0;
@@ -764,12 +762,24 @@ function renderList() {
     if (reasons.length) row.append(node('div', 'attention-reasons', reasons.join(' · ')));
     else if (!item.archivedAt)
       row.append(node('div', 'upcoming', 'Next review: ' + dateLabel(D.reviewDate(item))));
-    list.append(row);
+    if (Store.ui.view === 'all') {
+      const entry = node('div', 'contact-list-entry');
+      const edit = button('Edit', () => openEdit(item), 'project-edit');
+      edit.dataset.projectId = item.id;
+      edit.setAttribute('aria-label', 'Edit ' + item.name);
+      entry.append(row, edit);
+      list.append(entry);
+    } else {
+      list.append(row);
+    }
   });
 }
 function render() {
   const today = Store.ui.view === 'today';
   const archive = Store.ui.view === 'archive';
+  document
+    .getElementById('body')
+    .classList.toggle('editing-project', Store.ui.showForm && Store.ui.view === 'all');
   document.getElementById('today-count').textContent = stripTombstones(Store.items).filter((i) =>
     D.isDueToday(i)
   ).length;
@@ -797,11 +807,19 @@ function render() {
     month: 'short',
     day: 'numeric',
   });
+  document.getElementById('kbd-hint').textContent =
+    Store.ui.showForm && Store.ui.view === 'all'
+      ? 'Ctrl/Cmd+Enter save · Esc cancel'
+      : 'N new · / search · ' +
+        (Store.ui.view === 'all' ? 'E edit · ' : '') +
+        'R reviewed · Esc close';
   document.getElementById('form-panel').hidden = !Store.ui.showForm;
   renderList();
   renderDetail();
 }
 function switchView(view) {
+  Store.ui.showForm = false;
+  Store.ui.editId = null;
   Store.ui.view = view;
   Store.ui.sel = null;
   Store.ui.search = '';
@@ -848,12 +866,15 @@ function openAdd() {
   setSeg('status', 'active');
   setSeg('priority', 'medium');
   render();
-  setTimeout(() => document.getElementById('f-name').focus(), 40);
+  document.getElementById('f-name').focus();
 }
 function openEdit(it) {
+  if (Store.ui.view !== 'all' || it.archivedAt) return;
+  Store.ui.editScrollTop = document.getElementById('list').scrollTop;
+  Store.ui.sel = it.id;
   Store.ui.showForm = true;
   Store.ui.editId = it.id;
-  document.getElementById('form-label').textContent = 'Edit project';
+  document.getElementById('form-label').textContent = 'Edit project · ' + it.name;
   document.getElementById('form-save').textContent = 'Save changes';
   document.getElementById('f-name').value = it.name;
   document.getElementById('f-cat').value = it.category || '';
@@ -862,7 +883,7 @@ function openEdit(it) {
   setSeg('status', it.status);
   setSeg('priority', it.priority);
   render();
-  setTimeout(() => document.getElementById('f-name').focus(), 40);
+  document.getElementById('f-name').focus();
 }
 function fillSchedule(it) {
   const interval = it.reviewIntervalDays;
@@ -882,9 +903,19 @@ function updateRhythm() {
   document.getElementById('f-interval').required = custom;
 }
 function closeForm() {
+  const editId = Store.ui.editId;
   Store.ui.showForm = false;
   Store.ui.editId = null;
+  if (editId) Store.ui.sel = null;
   render();
+  if (editId) {
+    document.getElementById('list').scrollTop = Store.ui.editScrollTop || 0;
+    const edit = [...document.querySelectorAll('.project-edit')].find(
+      (el) => el.dataset.projectId === editId
+    );
+    if (edit) edit.focus({ preventScroll: true });
+    else document.getElementById('search').focus();
+  }
 }
 function saveForm() {
   if (!document.getElementById('form-panel').reportValidity()) return;
@@ -1005,6 +1036,16 @@ function wire() {
         Store.ui.sel = null;
         render();
       }
+      return;
+    }
+    if (
+      Store.ui.showForm &&
+      Store.ui.view === 'all' &&
+      (e.ctrlKey || e.metaKey) &&
+      e.key === 'Enter'
+    ) {
+      e.preventDefault();
+      saveForm();
       return;
     }
     if (typing || e.ctrlKey || e.metaKey || e.altKey || e.repeat) return;
