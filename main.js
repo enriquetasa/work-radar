@@ -1,10 +1,16 @@
 'use strict';
 
-const { app, BrowserWindow, ipcMain, dialog, Menu, shell } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, Menu, shell, safeStorage } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const fsp = fs.promises;
 const log = require('./logger');
+const { resolveSyncConfig } = require('./sync/config');
+const { createSessionStorage } = require('./sync/session-storage');
+const { createAuthClient } = require('./sync/auth-client');
+const { createAuthService } = require('./sync/auth-service');
+const { waitForCallback, REDIRECT_TO } = require('./sync/callback-server');
+const { isValidEmail } = require('./sync/validate');
 
 const DATA_FILE = () => path.join(app.getPath('userData'), 'work-radar-data.json');
 const BACKUP_DIR = () => path.join(app.getPath('userData'), 'backups');
@@ -13,6 +19,12 @@ const ICON_PNG = path.join(__dirname, 'build', 'icon.png');
 const MAX_BACKUPS = 30;
 
 let win = null;
+// Set during startup if (and only if) sync is configured AND the
+// platform's secret store (Electron safeStorage) is actually available —
+// see buildAuthService() below. Every auth IPC handler treats a null
+// authService as "sync disabled", which is exactly how the app behaved
+// before Phase 3 (see docs/supabase-sync-plan.md).
+let authService = null;
 
 /* ---------- JSON helpers ---------- */
 async function readJSON(file) {
@@ -162,11 +174,102 @@ ipcMain.handle('data:revealBackups', async () => {
   }
 });
 
+/* ---------- Sync/auth (see docs/supabase-sync-plan.md → "Sign-in flow") ---------- */
+const SESSION_FILE = () => path.join(app.getPath('userData'), 'sync-session.enc');
+
+// Builds the auth service, or returns null if sync isn't usable — either
+// because it's not configured at all (no env vars / sync-config.json), or
+// because this OS has no secret store for Electron's safeStorage to use.
+// Never throws: any failure here just means the app runs fully local, as
+// it always did.
+function buildAuthService() {
+  const syncConfig = resolveSyncConfig({ userDataDir: app.getPath('userData') });
+  if (!syncConfig.configured) {
+    log.debug('sync not configured — auth disabled');
+    return null;
+  }
+  if (!safeStorage.isEncryptionAvailable()) {
+    log.error(
+      'sync is configured but this system has no secret store for safeStorage — auth disabled'
+    );
+    return null;
+  }
+  // On Linux, isEncryptionAvailable() can still be true with the
+  // 'basic_text' backend (no keyring/D-Bus secret service), which uses a
+  // hardcoded key rather than one backed by the OS — the session file is
+  // then not meaningfully encrypted at rest. Auth still works (this is
+  // strictly better than the alternative of refusing to persist a session
+  // at all), but it's worth a loud warning rather than a silent downgrade.
+  if (
+    process.platform === 'linux' &&
+    typeof safeStorage.getSelectedStorageBackend === 'function' &&
+    safeStorage.getSelectedStorageBackend() === 'basic_text'
+  ) {
+    log.warn(
+      'safeStorage is using the basic_text backend (no OS keyring/D-Bus secret service) — ' +
+        'the persisted session is obfuscated, not meaningfully encrypted, on this system'
+    );
+  }
+  try {
+    const storage = createSessionStorage({
+      filePath: SESSION_FILE(),
+      encrypt: (buf) => safeStorage.encryptString(buf.toString('utf8')),
+      decrypt: (buf) => Buffer.from(safeStorage.decryptString(buf), 'utf8'),
+    });
+    const client = createAuthClient({
+      url: syncConfig.url,
+      publishableKey: syncConfig.publishableKey,
+      storage,
+    });
+    const service = createAuthService({ client, waitForCallback, redirectTo: REDIRECT_TO });
+    log.info('sync configured', { source: syncConfig.source });
+    return service;
+  } catch (err) {
+    log.error('failed to build auth service — auth disabled', { err });
+    return null;
+  }
+}
+
+ipcMain.handle('auth:status', async () => {
+  if (!authService) return { configured: false };
+  const status = await authService.getStatus();
+  return { configured: true, ...status };
+});
+
+ipcMain.handle('auth:signIn', async (_e, email) => {
+  if (!authService) return { ok: false, error: 'sync is not configured' };
+  if (!isValidEmail(email)) {
+    log.warn('rejected sign-in request with invalid email', { type: typeof email });
+    return { ok: false, error: 'enter a valid email address' };
+  }
+  try {
+    await authService.signIn(email.trim());
+    return { ok: true };
+  } catch (err) {
+    log.error('sign-in failed', { err });
+    return { ok: false, error: err.message };
+  }
+});
+
+ipcMain.handle('auth:signOut', async () => {
+  if (!authService) return { ok: false, error: 'sync is not configured' };
+  try {
+    await authService.signOut();
+    return { ok: true };
+  } catch (err) {
+    log.error('sign-out failed', { err });
+    return { ok: false, error: err.message };
+  }
+});
+
 /* ---------- Menu ---------- */
 function buildMenu() {
   const isMac = process.platform === 'darwin';
   const send = (action) => () => {
     if (win) win.webContents.send('menu', action);
+  };
+  const signOut = () => {
+    authService.signOut().catch((err) => log.error('menu sign-out failed', { err }));
   };
 
   const template = [
@@ -196,6 +299,7 @@ function buildMenu() {
         { label: 'Export PDF Report…', accelerator: 'CmdOrCtrl+Shift+E', click: send('exportPDF') },
         { label: 'Import Backup…', accelerator: 'CmdOrCtrl+I', click: send('import') },
         { label: 'Reveal Auto-Backups', click: send('reveal') },
+        ...(authService ? [{ type: 'separator' }, { label: 'Sign Out', click: signOut }] : []),
         ...(isMac ? [] : [{ type: 'separator' }, { role: 'quit' }]),
       ],
     },
@@ -276,6 +380,12 @@ app.whenReady().then(async () => {
   }
 
   await dailyBackup();
+  authService = buildAuthService();
+  if (authService) {
+    authService.onChange((status) => {
+      if (win) win.webContents.send('auth:stateChanged', status);
+    });
+  }
   buildMenu();
   await createWindow();
 

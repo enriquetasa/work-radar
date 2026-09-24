@@ -14,7 +14,14 @@ module.exports = [
 
   // Main + preload run in the Electron/Node main process (CommonJS).
   {
-    files: ['main.js', 'preload.js', 'logger.js', 'eslint.config.js', 'scripts/**/*.js'],
+    files: [
+      'main.js',
+      'preload.js',
+      'logger.js',
+      'eslint.config.js',
+      'scripts/**/*.js',
+      'sync/**/*.js',
+    ],
     languageOptions: {
       ecmaVersion: 2023,
       sourceType: 'commonjs',
@@ -28,14 +35,19 @@ module.exports = [
     languageOptions: {
       ecmaVersion: 2023,
       sourceType: 'script',
-      globals: { ...globals.browser, WorkRadarDomain: 'readonly' },
+      globals: {
+        ...globals.browser,
+        WorkRadarDomain: 'readonly',
+        WorkRadarAuthView: 'readonly',
+      },
     },
   },
 
-  // domain.js is dual-mode: it must run as a browser global AND as a
-  // CommonJS module under node:test, so it sees both global sets.
+  // domain.js and auth-view.js are dual-mode: they must run as a browser
+  // global AND as a CommonJS module under node:test, so they see both
+  // global sets.
   {
-    files: ['renderer/domain.js'],
+    files: ['renderer/domain.js', 'renderer/auth-view.js'],
     languageOptions: {
       ecmaVersion: 2023,
       sourceType: 'script',

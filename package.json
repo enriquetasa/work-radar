@@ -40,6 +40,7 @@
       "main.js",
       "preload.js",
       "logger.js",
+      "sync/**/*",
       "renderer/**/*",
       "package.json"
     ],

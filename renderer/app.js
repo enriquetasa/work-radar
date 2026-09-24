@@ -9,6 +9,7 @@
 // Pure domain logic lives in domain.js (loaded as window.WorkRadarDomain),
 // so it can be unit-tested under node:test without a DOM.
 const D = window.WorkRadarDomain;
+const AV = window.WorkRadarAuthView;
 const { PC, SC, CX, CY, R, BACKUP_DAYS, uid, fdt, daysSince, isStale, blipXY, stripTombstones } = D;
 const HAS_API = typeof window !== 'undefined' && !!window.radarAPI;
 
@@ -250,6 +251,82 @@ const Actions = {
       }
     } else {
       document.getElementById('import-file').click();
+    }
+  },
+};
+
+/* ---------- Auth (sync sign-in — see docs/supabase-sync-plan.md) ----------
+   Entirely optional: authStatus() reports { configured: false } when the
+   main process has no Supabase URL/key configured, and this stays fully
+   inert in that case — no UI is ever unhidden. Flow: email input →
+   "CHECK YOUR INBOX" (optimistic, set the instant the form is submitted)
+   → signed-in state, driven by the 'auth:stateChanged' push from main
+   once exchangeCodeForSession actually completes. Sign Out lives in the
+   Radar menu, not here (main.js only adds that menu item when sync is
+   configured). */
+const Auth = {
+  async init() {
+    if (!HAS_API || !window.radarAPI.authStatus) return;
+    let status;
+    try {
+      status = await window.radarAPI.authStatus();
+    } catch (err) {
+      console.error('authStatus failed', err);
+      return;
+    }
+    if (!status || !status.configured) return; // sync not configured — leave the panel hidden
+    document.getElementById('auth-panel').hidden = false;
+    this.render(status);
+    if (window.radarAPI.onAuthStateChanged) {
+      window.radarAPI.onAuthStateChanged((s) => this.render(s));
+    }
+    document.getElementById('auth-form').addEventListener('submit', (e) => {
+      e.preventDefault();
+      this.submit();
+    });
+  },
+  render(status) {
+    // The view/clear-error decision is pure — see renderer/auth-view.js
+    // for why only the signedIn and pending branches clear #auth-error.
+    const view = AV.computeAuthView(status);
+    if (view.clearError) document.getElementById('auth-error').hidden = true;
+    document.getElementById('auth-form').hidden = !view.form;
+    document.getElementById('auth-pending').hidden = !view.pending;
+    document.getElementById('auth-signed-in').hidden = !view.signedIn;
+    if (view.signedIn) document.getElementById('auth-email-label').textContent = status.email || '';
+  },
+  showError(message) {
+    document.getElementById('auth-pending').hidden = true;
+    document.getElementById('auth-signed-in').hidden = true;
+    document.getElementById('auth-form').hidden = false;
+    const err = document.getElementById('auth-error');
+    err.textContent = message;
+    err.hidden = false;
+  },
+  async submit() {
+    const input = document.getElementById('auth-email');
+    const email = input.value.trim();
+    if (!email) {
+      input.focus();
+      return;
+    }
+    // Optimistic: main won't resolve authSignIn until the whole
+    // magic-link round trip finishes (or fails/times out), so flip to
+    // "check your inbox" right away rather than waiting on it.
+    document.getElementById('auth-form').hidden = true;
+    document.getElementById('auth-error').hidden = true;
+    document.getElementById('auth-pending').hidden = false;
+    try {
+      const res = await window.radarAPI.authSignIn(email);
+      if (!res || !res.ok) {
+        console.error('sign-in failed', res && res.error);
+        this.showError((res && res.error) || 'SIGN-IN FAILED');
+      }
+      // On success, the 'auth:stateChanged' push already re-rendered as
+      // signed-in — nothing else to do here.
+    } catch (err) {
+      console.error('sign-in failed', err);
+      this.showError('SIGN-IN FAILED');
     }
   },
 };
@@ -770,6 +847,7 @@ function drawTicks() {
   wire();
   startClock();
   startSweep();
+  Auth.init().catch((err) => console.error('Auth.init failed', err));
   try {
     await Store.load();
   } catch (err) {

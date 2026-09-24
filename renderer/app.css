@@ -145,6 +145,50 @@ select {
   font-variant-numeric: tabular-nums;
 }
 
+#auth-panel {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+#auth-form {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+/* Both rules above set `display: flex`, which — since a page's own CSS
+   always beats the browser's built-in `[hidden] { display: none }` —
+   otherwise leaves these two visible even with the `hidden` attribute
+   set (found in review: the header showed the sign-in form even when
+   sync isn't configured). Scoped to just these two elements rather than
+   a blanket `[hidden]` rule, since every other `hidden` element in
+   index.html (the .auth-status spans) has no display override and
+   already hides correctly on its own. */
+#auth-panel[hidden],
+#auth-form[hidden] {
+  display: none;
+}
+#auth-email {
+  width: 150px;
+  font-size: 8px;
+  letter-spacing: 0.5px;
+  padding: 3px 6px;
+  border-color: #0f2816;
+}
+.auth-status {
+  font-size: 7px;
+  letter-spacing: 1px;
+  color: #2e7d4a;
+  white-space: nowrap;
+}
+.auth-status strong {
+  color: #00e676;
+  font-weight: normal;
+}
+.auth-error {
+  color: #ff9100;
+}
+
 #toolbar {
   border-bottom: 1px solid #1a5c2c;
   background: #020e07;

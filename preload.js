@@ -11,4 +11,12 @@ contextBridge.exposeInMainWorld('radarAPI', {
   import: () => ipcRenderer.invoke('data:import'),
   revealBackups: () => ipcRenderer.invoke('data:revealBackups'),
   onMenu: (cb) => ipcRenderer.on('menu', (_e, action) => cb(action)),
+
+  // Sync/auth (see docs/supabase-sync-plan.md → "Sign-in flow"). Always
+  // present — main.js's handlers report { configured: false } when sync
+  // isn't set up, and the renderer hides all sign-in UI in that case.
+  authStatus: () => ipcRenderer.invoke('auth:status'),
+  authSignIn: (email) => ipcRenderer.invoke('auth:signIn', email),
+  authSignOut: () => ipcRenderer.invoke('auth:signOut'),
+  onAuthStateChanged: (cb) => ipcRenderer.on('auth:stateChanged', (_e, status) => cb(status)),
 });

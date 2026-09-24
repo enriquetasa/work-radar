@@ -27,6 +27,12 @@ main process
 - The auth session is persisted encrypted with Electron `safeStorage`.
 - Only the **publishable** key ships in the app. The secret key never does —
   RLS is what protects the data.
+- **Sync/auth are entirely optional and never hardcoded.** The URL and
+  publishable key come from `WORK_RADAR_SUPABASE_URL` /
+  `WORK_RADAR_SUPABASE_KEY` env vars, or failing that a `sync-config.json`
+  dropped into the app's `userData` directory. If neither is present, sync
+  and auth are disabled and the app behaves exactly as it did before Phase
+  3 — fully local, no sign-in UI shown at all. See "Phase 3 notes" below.
 
 Sync loop: local change → mark rows dirty → push. On startup, window focus and
 each Realtime event → pull rows changed since the last cursor → merge into the
@@ -78,21 +84,24 @@ create policy "own items" on items for all
 Custom email templates need custom SMTP, so the app uses the default Magic
 Link email with the PKCE flow and a loopback redirect.
 
-1. Main calls `signInWithOtp({ email, options: { emailRedirectTo, shouldCreateUser: false } })`
+1. Main binds the loopback listener on `http://127.0.0.1:54390/auth/callback`
+   (loopback only) for up to 10 minutes, and confirms it's actually listening
+   — see "Phase 3 notes" below for why this comes first.
+2. Main calls `signInWithOtp({ email, options: { emailRedirectTo, shouldCreateUser: false } })`
    with `flowType: 'pkce'`. supabase-js keeps a code verifier locally and sends
    only its challenge.
-2. Main listens on `http://127.0.0.1:54390/auth/callback` (loopback only) for
-   up to 10 minutes.
 3. Clicking the email link verifies it and redirects the browser to the
-   callback with `?code=…`.
-4. The callback page says "you can close this tab"; main calls
-   `exchangeCodeForSession(code)` and persists the session.
+   callback with `?code=…` (and, from supabase-js 2.117 on, `&sb_flow_id=…`).
+4. The callback page says "you can close this tab and return to Work Radar";
+   main calls `exchangeCodeForSession(code, flowId ? { flowId } : undefined)`
+   and persists the session.
 
 The link must be opened on the machine that is signing in, since only that
 machine holds the verifier. The callback URL is both the Site URL and the only
 allowed Redirect URL, locally (`supabase/config.toml`) and in the hosted
-project. If port 54390 is taken, sign-in fails with a clear error rather than
-picking another port, because the redirect allow-list is exact.
+project. If port 54390 is taken, binding fails with a clear error — before any
+email is sent — rather than picking another port, because the redirect
+allow-list is exact.
 
 ## Phases
 
@@ -401,6 +410,245 @@ excluded.updated_at > public.items.updated_at`. A stale incoming
   policy grants them, affect zero rows. Cleanup is centralised in the
   suite's `after` hook, which deletes both users — the cascade removes
   every row they created, so no test cleans up its own rows.
+
+## Phase 3 notes (auth)
+
+Implemented under `sync/` (main-process-only CommonJS modules, no Electron
+dependency except where noted) plus thin wiring in `main.js`/`preload.js`
+and a small sign-in affordance in `renderer/`. No sync engine yet —
+Phase 3 only gets a session; pushing/pulling rows is Phase 4.
+
+- **Every piece of logic that isn't Electron itself lives in a plain,
+  dependency-injected Node module under `sync/`**, so it's unit-testable
+  under `node:test` without Electron or a live network call — the same
+  split the rest of the app already uses between `domain.js` (pure) and
+  `main.js`/`app.js` (DOM/IO/Electron wiring):
+  - `sync/config.js` — resolves the URL/key, or reports that sync is
+    disabled (`{ configured: false }`); `readFileSync` and `log` are
+    both injected — `log` the same way `callback-server.js` and
+    `auth-service.js` already do it — so tests never touch the real
+    filesystem or spam stdout with the warn-path structured logs.
+  - `sync/session-storage.js` — the storage adapter handed to
+    supabase-js's `auth.storage` option. `encrypt`/`decrypt` are
+    injected (Electron `safeStorage` in `main.js`, a reversible XOR fake
+    in tests) — this module never imports Electron.
+  - `sync/callback-request.js` — pure parsing of the loopback redirect's
+    query string into either a success (`ok: true`, plus `code` and any
+    `flowId`) or a failure (`ok: false`, plus `error` and
+    `errorDescription`).
+  - `sync/callback-server.js` — the one piece that's necessarily
+    `node:http`, kept as thin as possible around
+    `callback-request.js`'s parsing; `port`/`host`/`timeoutMs`/`log` are
+    injectable so tests can use throwaway ports, short timeouts and a
+    silent logger instead of the real 54390 / 10 minutes / stdout.
+  - `sync/auth-service.js` — orchestrates `signInWithOtp` → wait for the
+    callback → `exchangeCodeForSession`, plus `signOut`/`getStatus`/
+    `onChange`. The supabase-js `client` and `waitForCallback` are both
+    injected, so the whole flow is tested with fakes
+    (`test/sync-auth-service.test.js`) as well as for real
+    (`test/integration/auth.test.js`).
+  - `sync/auth-client.js` — the one place that actually calls
+    `createClient`; thin enough (no branching) that it isn't separately
+    unit-tested, the same way `preload.js` isn't.
+  - `sync/validate.js` — `isValidEmail`, used at the IPC boundary in
+    `main.js` before anything reaches supabase-js.
+  - `renderer/auth-view.js` — the one piece of `Auth.render()`'s logic
+    that's pure (which panel to show, and whether to clear `#auth-error`
+    — see the `render()` bullet below), so it's unit-tested the same way
+    (`test/auth-view.test.js`) despite living in `renderer/`.
+- **`signIn()` tags every log line one attempt produces — start, bind
+  failure, OTP, callback, exchange — with a short `attemptId`**
+  (`crypto.randomUUID()`), so concurrent or successive attempts can be
+  told apart in the logs, per the observability rule. This includes a
+  rejection of `pending.result` itself (a Supabase `?error=` redirect, a
+  timeout, or a cancel) — found in review: that path used to be logged
+  only by the callback server (no `attemptId`) and by `main.js`'s
+  generic "sign-in failed" (also no `attemptId`), so the most common
+  failure had no line correlating it with the rest of the attempt.
+- **`signOut()` treats a server-side error as a warning, not a hard
+  failure, when `getSession()` afterwards shows no session.** auth-js's
+  own `_signOut` clears the local session even when the server call
+  fails (e.g. offline), and still returns that error — throwing
+  regardless would make `main.js` log "sign-out failed" and the Radar
+  menu's click handler log it too, although the user really is signed
+  out locally. It still throws if the local session is somehow still
+  present.
+- **One encrypted file, one JSON blob.** `session-storage.js` doesn't map
+  supabase-js keys to separate files — it reads/decrypts the whole file
+  into an object, mutates one key, re-encrypts and atomically rewrites
+  it (temp file + rename, same pattern as the main data file). This
+  matters because supabase-js's PKCE flow stores _two_ keys under one
+  `storage` — the session itself (`sb-<ref>-auth-token`) and the code
+  verifier (`sb-<ref>-auth-token-code-verifier`) written during
+  `signInWithOtp` and read back during `exchangeCodeForSession` — and
+  both need to survive in the same place.
+- **A corrupt or undecryptable session file degrades to "no session",
+  never a crash.** `getItem` catches a decrypt/parse failure, logs a
+  warning with context (via an injectable `log`, same pattern as
+  `config.js`, `callback-server.js` and `auth-service.js` — found in
+  review, since this module used to reach for the module-level logger
+  directly and a unit test exercising this path always printed to
+  stdout), and returns `null` — supabase-js then just treats the user as
+  signed out, same as a first run. The trade-off (flagged in review, left
+  as-is): the very next `setItem` (e.g. a PKCE verifier written on the
+  next sign-in attempt) then overwrites the file from an empty store, so
+  a keyring that's briefly unavailable at startup would silently drop a
+  still-valid session rather than just failing to read it. This is
+  recoverable by signing in again, so it's treated as an accepted
+  trade-off rather than data loss; moving an undecryptable file aside
+  (e.g. to `.corrupt`) instead of overwriting it is a possible later
+  improvement, not done here.
+- **`safeStorage` unavailability disables auth, not the app.**
+  `main.js`'s `buildAuthService()` checks
+  `safeStorage.isEncryptionAvailable()` (false on a Linux box with no
+  keyring/D-Bus secret service, which includes this dev container)
+  before building anything, and returns `null` — logged as an error —
+  rather than persisting an unencrypted session or throwing. Every IPC
+  handler and the Radar menu treat a `null` authService exactly like
+  "sync not configured": no sign-in UI, no Sign Out menu item. This is
+  also why Phase 3 was verified with the unit suite plus a real
+  `sync/auth-*` integration test against local Supabase rather than by
+  running the packaged Electron app on this machine — see "Environment"
+  in the task that produced this phase.
+- **The loopback server is intentionally minimal and single-shot.** One
+  `http.createServer`, listens only on `127.0.0.1:54390`, and `finish()`
+  closes it on the _first_ request that parses as either a code or an
+  error — a stray request to any other path 404s without settling
+  anything. `Connection: close` is set on the settling response so
+  `server.close()` doesn't linger on a keep-alive socket (observed
+  adding ~3s per test before this header was added), and
+  `server.closeAllConnections()` (Node 18.2+) is called right after, so a
+  lingering (e.g. preconnect) socket can't hold the close up either.
+  EADDRINUSE is surfaced as a plain rejection, not retried on another
+  port — see the "Sign-in flow" section above for why that would just
+  make the Supabase-side redirect allow-list fail instead.
+- **`waitForCallback()` returns `{ listening, result, cancel }`, not one
+  promise.** `listening` settles as soon as the port is bound (or rejects
+  with a clear "Port 54390 is in use by another program — close it and
+  try again" on EADDRINUSE); `result` settles the way the callback used
+  to. `auth-service.js`'s `signIn()` awaits `listening` — and so binds
+  the port — _before_ calling `signInWithOtp`, because a magic-link email
+  already sent when the bind then fails can't be un-sent and both the
+  local and hosted rate limits on it are tight. If `signInWithOtp` itself
+  errors after the port is already bound, `signIn()` calls `cancel()`
+  rather than leaving the listener running for the rest of the timeout.
+- **The failure page HTML-escapes `error`/`error_description`, and caps
+  their reflected length.** Both come straight off the query string of a
+  request anyone can send to the loopback port while a sign-in is
+  pending, so without escaping, a crafted redirect (or a local process)
+  could run script on that origin — found in review and fixed with a
+  failing-test-first regression in `test/sync-callback-server.test.js`.
+  Every response from the server (success, failure or 404) also carries
+  `Content-Security-Policy: default-src 'none'; style-src 'unsafe-inline'`
+  and `X-Content-Type-Options: nosniff` as defence in depth. The success
+  page's wording is the plan's own ("You can close this tab and return
+  to Work Radar."), not a claim of having signed in — it's served before
+  `exchangeCodeForSession` runs.
+- **`sb_flow_id` is parsed off the callback and passed through.**
+  supabase-js 2.117 appends `?sb_flow_id=<id>` to `emailRedirectTo`, and
+  `exchangeCodeForSession(code, flowId ? { flowId } : undefined)` uses it
+  instead of relying only on the fixed `<key>-code-verifier` storage
+  entry, which auth-js itself calls a "deprecation-window dual write"
+  that a future version could drop.
+- **`signIn()` refuses a second concurrent call** rather than starting a
+  second loopback listener (which would hit the same EADDRINUSE). A
+  second attempt (e.g. a renderer double-submit — the optimistic
+  "CHECK YOUR INBOX" state should already prevent this, but it's cheap
+  insurance) throws immediately with a clear message instead of the
+  confusing lower-level port error. `getStatus()` and every state pushed
+  through `onChange` also carry a `pending` flag mirroring this, so a
+  renderer that reloads mid-sign-in (`authStatus()` on init) shows "CHECK
+  YOUR INBOX" again instead of the form, rather than only discovering the
+  conflict by trying to submit and getting "already pending" back.
+- **`signIn()` also refuses to start when a session already exists**
+  (checked via `getStatus()`, right after the pending flag but still
+  before the loopback listener is ever started) — the IPC handler in
+  `main.js` accepted this before, and the service would happily emit
+  `{ signedIn:false, pending:true }` for an already-signed-in user,
+  briefly making the renderer look signed out.
+- **`session-storage.js` serialises every `getItem`/`setItem`/
+  `removeItem` through one per-instance promise queue**, and each write
+  uses a unique `<file>.<pid>.<uuid>.tmp` path rather than a fixed
+  `<file>.tmp`. auth-js is lockless in Node and expects overlapping calls
+  (e.g. an autoRefresh save racing a sign-out's removal); each call is a
+  read-modify-write over the whole file, so without either fix, two
+  overlapping calls could drop each other's key or race on the same tmp
+  path.
+- **IPC surface**: `auth:status` (`{ configured, signedIn, email, pending }`
+  or just `{ configured: false }`), `auth:signIn` (email —
+  validated with `sync/validate.js` in `main.js` _before_ it reaches
+  supabase-js; invalid input never starts a loopback server),
+  `auth:signOut`, and a main → renderer push on `auth:stateChanged`
+  driven by `authService.onChange` (itself wired to supabase-js's own
+  `onAuthStateChange`, so a token refresh or an external sign-out is
+  reflected too, not just this app's own sign-in/out calls).
+- **Renderer**: `#auth-panel` starts `hidden` in `index.html` and is only
+  ever unhidden after `authStatus()` reports `{ configured: true }` — so
+  browser-fallback mode and an unconfigured desktop app show zero
+  sign-in UI, per the plan. This depends on `app.css` not overriding the
+  browser's built-in `[hidden] { display: none }` for these elements —
+  found in review: `#auth-panel`/`#auth-form` both set `display: flex`
+  in their own rules, which beats that default, so the `hidden`
+  attribute alone did nothing and the form stayed visible regardless of
+  `configured`/pending/signed-in state. Fixed with a scoped
+  `#auth-panel[hidden], #auth-form[hidden] { display: none; }` rule
+  (the `.auth-status` spans have no display override, so they already
+  hid correctly on their own) and a regression test
+  (`test/renderer-css.test.js`) asserting the override rule is present,
+  since there's no jsdom/browser engine here to exercise the cascade
+  itself. Submitting the email form flips to "CHECK
+  YOUR INBOX" _before_ awaiting `authSignIn()` (which doesn't resolve
+  until the whole round trip finishes or fails), then relies on the
+  `auth:stateChanged` push to flip to the signed-in state — a failure
+  instead shows the error and reverts to the form. On init/reload,
+  `status.pending` renders the same "CHECK YOUR INBOX" state directly,
+  ahead of any push. Sign Out is a Radar menu item (`main.js`'s
+  `buildMenu()`), added only when `authService` is non-null, per the
+  plan; it isn't yet disabled while signed out (left for a later pass —
+  clicking it while signed out is a harmless no-op against a client with
+  no session).
+- **`render()` only clears `#auth-error` on a genuine transition into
+  signed-in or pending, never on the signed-out/not-pending branch.**
+  That branch is also what a _failed_ sign-in settles into: `signIn()`'s
+  `finally` block pushes the settled `{ signedIn:false, pending:false }`
+  status asynchronously (it awaits its own `getStatus()` and a file
+  read), which arrives _after_ the IPC error reply — found in review and
+  reproduced with an ordering script.
+  Without this, that push reached `render()` and hid the very message
+  `showError()` had just shown, for every failure (port in use, rate
+  limit, disallowed signup, timeout, bad code). The view/clear-error
+  decision is a pure function, `renderer/auth-view.js`'s
+  `computeAuthView()` (unit-tested in `test/auth-view.test.js`), since
+  there's no renderer DOM test harness to exercise `render()` itself.
+- **On Linux, `buildAuthService()` also checks
+  `safeStorage.getSelectedStorageBackend()`.** `isEncryptionAvailable()`
+  can be `true` there with the `basic_text` backend (no keyring/D-Bus
+  secret service), which encrypts with a hardcoded key rather than an
+  OS-backed one. Auth still proceeds — refusing to persist a session at
+  all would be worse — but this logs a warning so it's not a silent
+  downgrade.
+- **Integration test** (`test/integration/auth.test.js`) drives the real
+  flow end to end against local Supabase: admin-creates a confirmed
+  user, calls the real `sync/auth-service.js` `signIn()`, polls
+  Mailpit's HTTP API (`GET /api/v1/messages`, then
+  `/api/v1/message/:id`) for the magic-link email and regex-extracts the
+  `.../auth/v1/verify?...` URL from its plain-text body, `fetch()`es
+  that link with `redirect: 'follow'` so the 303 it returns actually
+  reaches the real loopback server on 54390, and asserts: `signIn()`
+  resolves, `getStatus()` reports the right email, the session file on
+  disk is not plaintext and decrypts (via the test's fake XOR
+  encryptor) to a session whose `user.email` matches, and a _second_,
+  independently-constructed client/service reading that same file comes
+  back already signed in (the "restorable" requirement) with no further
+  network call. Cleanup deletes the admin-created user in `after`, same
+  pattern as `test/integration/sync.test.js`. No rate-limit bump to
+  `supabase/config.toml` was needed to get this passing repeatably.
+- **Deliberately left as-is, from review**: a `Host` header check on the
+  loopback server (only a denial-of-service against a pending sign-in —
+  PKCE already stops a code-injection takeover — and the review flagged
+  it as optional); and disabling the Radar menu's Sign Out item while
+  already signed out (harmless no-op, already called out above as
+  deferred to a later pass). Both are still open, not forgotten.
 
 ## Open items
 
