@@ -193,3 +193,107 @@ test('a rejected key does not join or block a concurrent valid save', async () =
   assert.equal(goodResult.ok, true);
   assert.equal(deps.initCalls.length, 1);
 });
+
+test('a call for a DIFFERENT key while a save is in flight does not share that result — it waits, then runs its own fresh sequence', async () => {
+  let resolveSave;
+  const deps = makeDeps({
+    saveKey: async (key) => {
+      deps.saveCalls.push(key);
+      await new Promise((resolve) => {
+        resolveSave = resolve;
+      });
+    },
+  });
+  const handler = createSaveKeyHandler(deps);
+
+  const first = handler.handleSaveKey('sb_publishable_first');
+  await Promise.resolve();
+  await Promise.resolve();
+  const second = handler.handleSaveKey('sb_publishable_second');
+
+  let secondSettled = false;
+  second.then(() => {
+    secondSettled = true;
+  });
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.equal(
+    secondSettled,
+    false,
+    'a different-key call must not resolve while the first key is still saving'
+  );
+
+  resolveSave();
+  const [firstResult, secondResult] = await Promise.all([first, second]);
+
+  assert.deepEqual(firstResult, { ok: true });
+  // The second run starts fresh only once the first has settled — by
+  // then isAlreadyConfigured() is already true, so it never actually
+  // saves the second key at all. Reporting ok:true here (as the plain
+  // "already configured, nothing to do" skip normally does) would be
+  // misleading: it would tell the caller their own key is now in
+  // effect, when really the *first* call's key won instead — so this
+  // specific case (found in review) is reported as its own failure.
+  assert.deepEqual(secondResult, { ok: false, error: 'Sync is already configured.' });
+  assert.deepEqual(deps.saveCalls, ['sb_publishable_first']);
+  assert.equal(deps.initCalls.length, 1);
+});
+
+test('a call with the same key plus extra whitespace still joins the in-flight run (matched by trimmed key)', async () => {
+  let resolveSave;
+  const deps = makeDeps({
+    saveKey: async (key) => {
+      deps.saveCalls.push(key);
+      await new Promise((resolve) => {
+        resolveSave = resolve;
+      });
+    },
+  });
+  const handler = createSaveKeyHandler(deps);
+  const first = handler.handleSaveKey('sb_publishable_ok');
+  await Promise.resolve();
+  const second = handler.handleSaveKey('  sb_publishable_ok  ');
+  await Promise.resolve();
+  await Promise.resolve();
+  resolveSave();
+  const [firstResult, secondResult] = await Promise.all([first, second]);
+  assert.deepEqual(firstResult, { ok: true });
+  assert.deepEqual(secondResult, { ok: true });
+  assert.equal(deps.saveCalls.length, 1, 'must join, not run saveKey a second time');
+});
+
+test('initSyncAndAuth() throwing is caught, logged with structured context (never the key), and reported as a failure', async () => {
+  const errorCalls = [];
+  const deps = makeDeps({
+    initSyncAndAuth: () => {
+      throw new Error('boom');
+    },
+    log: { ...silentLog, error: (msg, ctx) => errorCalls.push({ msg, ctx }) },
+  });
+  const handler = createSaveKeyHandler(deps);
+  const result = await handler.handleSaveKey('sb_publishable_ok');
+  assert.equal(result.ok, false);
+  assert.match(result.error, /sync could not be started|logs for details/i);
+  assert.equal(errorCalls.length, 1);
+  assert.ok(!JSON.stringify(errorCalls).includes('sb_publishable_ok'));
+  assert.ok(errorCalls[0].ctx && errorCalls[0].ctx.err instanceof Error);
+  // The save itself must not be undone by a later init failure.
+  assert.deepEqual(deps.saveCalls, ['sb_publishable_ok']);
+});
+
+test('after initSyncAndAuth() throws, a later call is not stuck permanently joined — it gets a fresh run', async () => {
+  let shouldThrow = true;
+  const deps = makeDeps({
+    initSyncAndAuth: () => {
+      if (shouldThrow) throw new Error('boom');
+      return true;
+    },
+  });
+  const handler = createSaveKeyHandler(deps);
+  const first = await handler.handleSaveKey('sb_publishable_ok');
+  assert.equal(first.ok, false);
+
+  shouldThrow = false;
+  const second = await handler.handleSaveKey('sb_publishable_ok');
+  assert.deepEqual(second, { ok: true });
+});
