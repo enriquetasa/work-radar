@@ -11,7 +11,7 @@
 const D = window.WorkRadarDomain;
 const AV = window.WorkRadarAuthView;
 const SV = window.WorkRadarSyncView;
-const { PC, SC, CX, CY, R, BACKUP_DAYS, uid, fdt, daysSince, isStale, blipXY, stripTombstones } = D;
+const { PC, SC, uid, fdt, stripTombstones } = D;
 const HAS_API = typeof window !== 'undefined' && !!window.radarAPI;
 
 /* ---------- Persistence adapter ---------- */
@@ -49,7 +49,7 @@ const Store = {
   arch: [],
   lastExport: 0,
   ui: {
-    view: 'live',
+    view: 'today',
     filter: 'all',
     sort: 'priority',
     search: '',
@@ -129,9 +129,13 @@ const Actions = {
   // updatedAt bump (and, for purge, the tombstone) is unit-tested rather
   // than only reachable through the DOM — see the "Item mutations" section
   // of domain.js.
-  ping(id) {
+  review(id, nextDate) {
     const now = Date.now();
-    Store.items = Store.items.map((i) => (i.id === id ? D.pingItem(i, now) : i));
+    Store.items = Store.items.map((i) => (i.id === id ? D.reviewItem(i, now, nextDate) : i));
+    commit();
+  },
+  snooze(id, date) {
+    Store.items = Store.items.map((i) => (i.id === id ? D.snoozeItem(i, date, Date.now()) : i));
     commit();
   },
   archive(id) {
@@ -298,7 +302,10 @@ const Auth = {
     document.getElementById('auth-form').hidden = !view.form;
     document.getElementById('auth-pending').hidden = !view.pending;
     document.getElementById('auth-signed-in').hidden = !view.signedIn;
-    if (view.signedIn) document.getElementById('auth-email-label').textContent = status.email || '';
+    if (view.signedIn) {
+      document.getElementById('auth-email-label').textContent = 'Cloud connected';
+      document.getElementById('auth-signed-in').title = status.email || '';
+    }
   },
   showError(message) {
     document.getElementById('auth-pending').hidden = true;
@@ -457,6 +464,10 @@ const Sync = {
     el.hidden = view.hidden;
     el.textContent = view.label;
     el.className = 'auth-status' + (view.className ? ' ' + view.className : '');
+    el.title =
+      status && status.state === 'synced' ? 'Your projects are synced across devices' : view.label;
+    const signedIn = document.getElementById('auth-signed-in');
+    signedIn.classList.toggle('sync-has-status', !view.hidden);
   },
   async reload() {
     try {
@@ -495,296 +506,311 @@ function visibleList() {
 }
 
 /* ---------- Render ---------- */
-function renderStats() {
-  const live = stripTombstones(Store.items);
-  document.getElementById('s-crit').textContent = live.filter(
-    (i) => i.priority === 'critical'
-  ).length;
-  document.getElementById('s-high').textContent = live.filter((i) => i.priority === 'high').length;
-  document.getElementById('s-review').textContent = live.filter(isStale).length;
-  document.getElementById('s-live').textContent = live.length;
-  document.getElementById('s-arch').textContent = stripTombstones(Store.arch).length;
-  const due = Store.lastExport === 0 ? live.length > 0 : daysSince(Store.lastExport) >= BACKUP_DAYS;
-  document.getElementById('backup-warn').style.display = due ? 'inline' : 'none';
+function node(tag, className, text) {
+  const el = document.createElement(tag);
+  if (className) el.className = className;
+  if (text !== undefined) el.textContent = text;
+  return el;
 }
-
-const SVGNS = 'http://www.w3.org/2000/svg';
-function renderBlips() {
-  const g = document.getElementById('blips');
-  while (g.firstChild) g.removeChild(g.firstChild);
-  stripTombstones(Store.items).forEach((item) => {
-    const pos = blipXY(item),
-      col = PC[item.priority],
-      isSel = Store.ui.sel === item.id,
-      stale = isStale(item);
-    const sz = isSel ? 5.5 : 4;
-    const grp = document.createElementNS(SVGNS, 'g');
-    grp.style.cursor = 'pointer';
-    grp.addEventListener('click', () => {
-      Store.ui.sel = isSel ? null : item.id;
-      render();
-    });
-    if (isSel) {
-      const c = document.createElementNS(SVGNS, 'circle');
-      c.setAttribute('cx', pos.x);
-      c.setAttribute('cy', pos.y);
-      c.setAttribute('r', 13);
-      c.setAttribute('fill', 'none');
-      c.setAttribute('stroke', col);
-      c.setAttribute('stroke-width', '1');
-      c.setAttribute('stroke-opacity', '.35');
-      c.setAttribute('stroke-dasharray', '3 2');
-      grp.appendChild(c);
-    }
-    if (stale) {
-      const ring = document.createElementNS(SVGNS, 'circle');
-      ring.setAttribute('cx', pos.x);
-      ring.setAttribute('cy', pos.y);
-      ring.setAttribute('r', 9);
-      ring.setAttribute('fill', 'none');
-      ring.setAttribute('stroke', '#ff9100');
-      ring.setAttribute('stroke-width', '1');
-      ring.setAttribute('stroke-dasharray', '2 2');
-      ring.classList.add('blink');
-      grp.appendChild(ring);
-    }
-    const rect = document.createElementNS(SVGNS, 'rect');
-    rect.setAttribute('x', pos.x - sz);
-    rect.setAttribute('y', pos.y - sz);
-    rect.setAttribute('width', sz * 2);
-    rect.setAttribute('height', sz * 2);
-    rect.setAttribute('fill', col);
-    rect.setAttribute('fill-opacity', '0.55');
-    rect.setAttribute('class', 'blip-rect');
-    rect.dataset.deg = pos.deg;
-    if (isSel) rect.setAttribute('transform', 'rotate(45,' + pos.x + ',' + pos.y + ')');
-    grp.appendChild(rect);
-    if (isSel) {
-      const t = document.createElementNS(SVGNS, 'text');
-      t.setAttribute('x', pos.x + 11);
-      t.setAttribute('y', pos.y + 3);
-      t.setAttribute('fill', col);
-      t.setAttribute('font-size', '7');
-      t.setAttribute('letter-spacing', '1');
-      t.textContent = item.name.slice(0, 14).toUpperCase();
-      grp.appendChild(t);
-    }
-    g.appendChild(grp);
+function button(label, fn, cls = '') {
+  const el = node('button', 'dact ' + cls, label);
+  el.type = 'button';
+  el.addEventListener('click', fn);
+  return el;
+}
+function dateLabel(date) {
+  if (!date) return 'Not scheduled';
+  return new Date(date + 'T12:00:00').toLocaleDateString(undefined, {
+    month: 'short',
+    day: 'numeric',
+    year: 'numeric',
   });
 }
-
+function dateAfter(days) {
+  const date = new Date();
+  date.setDate(date.getDate() + days);
+  return D.localDate(date.getTime());
+}
 function renderDetail() {
-  const dp = document.getElementById('detail-panel');
+  const panel = document.getElementById('detail-panel');
   const it = [...stripTombstones(Store.items), ...stripTombstones(Store.arch)].find(
     (i) => i.id === Store.ui.sel
   );
-  if (!it || Store.ui.showForm) {
-    dp.style.display = 'none';
-    return;
-  }
-  dp.style.display = 'block';
-  document.getElementById('detail-name').textContent = it.name.toUpperCase();
+  panel.hidden = !it || Store.ui.showForm;
+  document.getElementById('inspector').hidden = !it && !Store.ui.showForm;
+  if (panel.hidden) return;
+  document.getElementById('detail-name').textContent = it.name;
   const meta = document.getElementById('detail-meta');
-  meta.innerHTML = '';
-  const add = (t, c) => {
-    const s = document.createElement('span');
-    s.textContent = t;
-    s.style.color = c;
-    meta.appendChild(s);
-  };
-  const sep = () => {
-    const s = document.createElement('span');
-    s.textContent = '│';
-    s.style.color = '#152e1a';
-    meta.appendChild(s);
-  };
-  add(it.priority.toUpperCase(), PC[it.priority]);
-  sep();
-  add(
-    it.archivedAt ? 'ARCHIVED' : it.status.toUpperCase(),
-    it.archivedAt ? '#546e7a' : SC[it.status]
-  );
-  if (it.category) {
-    sep();
-    add(it.category.toUpperCase(), '#2e7d4a');
+  meta.replaceChildren();
+  for (const [label, color] of [
+    [it.archivedAt ? 'Archived' : it.status, SC[it.status]],
+    [it.priority + ' priority', PC[it.priority]],
+    [it.category, ''],
+  ]) {
+    if (!label) continue;
+    const el = node('span', '', label);
+    if (color) el.style.color = color;
+    meta.append(el);
   }
-  if (!it.archivedAt && isStale(it)) {
-    sep();
-    add('NEEDS REVIEW', '#ff9100');
+  const context = document.getElementById('detail-context');
+  context.replaceChildren();
+  if (it.waitingOn) context.append(node('p', '', 'Waiting on ' + it.waitingOn));
+  if (it.checkpoint || it.checkpointOn) {
+    const checkpoint = node('div', 'checkpoint');
+    checkpoint.append(
+      node('span', 'eyebrow', 'Next checkpoint'),
+      node('p', '', it.checkpoint || 'Follow up')
+    );
+    if (it.checkpointOn)
+      checkpoint.append(node('span', 'checkpoint-date', dateLabel(it.checkpointOn)));
+    if (!it.archivedAt)
+      checkpoint.append(
+        button(
+          'Complete checkpoint',
+          () => Actions.update(it.id, { checkpoint: '', checkpointOn: '' }),
+          'quiet'
+        )
+      );
+    context.append(checkpoint);
   }
-  const dn = document.getElementById('detail-notes');
-  if (it.notes) {
-    dn.textContent = it.notes;
-    dn.style.display = 'block';
-  } else dn.style.display = 'none';
-  const rev = it.archivedAt ? '' : '  ·  REVIEWED ' + daysSince(it.reviewedAt) + 'd AGO';
-  document.getElementById('detail-date').textContent =
-    (it.archivedAt ? 'ARCHIVED ' + fdt(it.archivedAt) : 'ACQUIRED ' + fdt(it.addedAt)) + rev;
-  const da = document.getElementById('detail-actions');
-  da.innerHTML = '';
-  const mk = (label, cls, fn) => {
-    const b = document.createElement('button');
-    b.className = 'dact ' + cls;
-    b.textContent = label;
-    b.onclick = fn;
-    da.appendChild(b);
-  };
+  const notes = document.getElementById('detail-notes');
+  notes.textContent = it.notes || '';
+  notes.hidden = !it.notes;
+  const schedule = document.getElementById('detail-schedule');
+  schedule.replaceChildren();
+  const actions = document.getElementById('detail-actions');
+  actions.replaceChildren();
   if (!it.archivedAt) {
-    mk('PING', 'primary', () => Actions.ping(it.id));
-    mk('EDIT', '', () => openEdit(it));
-    mk('ARCHIVE', 'muted', () => Actions.archive(it.id));
-  } else {
-    mk('RESTORE', '', () => Actions.restore(it.id));
-    mk('PURGE', 'danger', () => {
-      if (confirm('PURGE? Removes it from this and synced devices.')) Actions.purge(it.id);
+    const rhythm = it.reviewIntervalDays
+      ? 'Every ' + it.reviewIntervalDays + ' days'
+      : 'Only when scheduled';
+    schedule.append(
+      node('span', 'eyebrow', 'Review rhythm'),
+      node('p', '', rhythm + ' · Next: ' + dateLabel(D.reviewDate(it)))
+    );
+    const label = node('label', '', 'Next review after this check-in');
+    label.htmlFor = 'review-choice';
+    const select = node('select');
+    select.id = 'review-choice';
+    for (const [value, text] of [
+      ['rhythm', 'Use review rhythm'],
+      ['1', 'Tomorrow'],
+      ['3', 'In 3 days'],
+      ['7', 'In a week'],
+      ['30', 'In 30 days'],
+      ['custom', 'Choose a date…'],
+    ]) {
+      const option = node('option', '', text);
+      option.value = value;
+      select.append(option);
+    }
+    const date = node('input');
+    date.type = 'date';
+    date.hidden = true;
+    date.min = D.localDate();
+    date.setAttribute('aria-label', 'Custom next review date');
+    const chosenDate = () =>
+      select.value === 'custom'
+        ? date.value
+        : select.value === 'rhythm'
+          ? undefined
+          : dateAfter(Number(select.value));
+    const validChoice = () => select.value !== 'custom' || date.reportValidity();
+    const snooze = button('Snooze review', () => {
+      if (validChoice()) Actions.snooze(it.id, chosenDate());
     });
+    snooze.disabled = true;
+    select.addEventListener('change', () => {
+      date.hidden = select.value !== 'custom';
+      date.required = !date.hidden;
+      snooze.disabled = select.value === 'rhythm';
+      if (!date.hidden) date.focus();
+    });
+    const controls = node('div', 'review-controls');
+    controls.append(select, date);
+    const reviewActions = node('div', 'review-actions');
+    reviewActions.append(
+      button(
+        'Reviewed',
+        () => {
+          if (validChoice()) Actions.review(it.id, chosenDate());
+        },
+        'primary'
+      ),
+      snooze
+    );
+    schedule.append(
+      label,
+      controls,
+      reviewActions,
+      node(
+        'p',
+        'field-help',
+        'Reviewing resets this rhythm. Checkpoints stay open until completed.'
+      )
+    );
+    actions.append(
+      button('Edit project', () => openEdit(it)),
+      button('Archive', () => Actions.archive(it.id), 'quiet')
+    );
+  } else {
+    actions.append(
+      button('Restore', () => Actions.restore(it.id)),
+      button(
+        'Delete permanently',
+        () => {
+          if (confirm('Delete this project from this and synced devices?')) Actions.purge(it.id);
+        },
+        'danger'
+      )
+    );
   }
-  const cb = document.createElement('button');
-  cb.className = 'dact close-btn';
-  cb.textContent = '✕';
-  cb.onclick = () => {
-    Store.ui.sel = null;
-    render();
-  };
-  da.appendChild(cb);
-
-  // Log entries (newest first)
-  const logEl = document.getElementById('detail-log');
-  logEl.innerHTML = '';
+  document.getElementById('detail-date').textContent = it.archivedAt
+    ? 'Archived ' + fdt(it.archivedAt)
+    : 'Last reviewed ' + fdt(it.reviewedAt || it.addedAt);
+  const log = document.getElementById('detail-log');
+  log.replaceChildren();
   const entries = (it.log || []).slice().reverse();
   if (entries.length) {
-    const hdr = document.createElement('div');
-    hdr.className = 'detail-log-header';
-    hdr.textContent = '◈ LOG  (' + entries.length + ')';
-    logEl.appendChild(hdr);
+    log.append(node('h3', 'eyebrow', 'Activity · ' + entries.length));
     entries.forEach((entry) => {
-      const row = document.createElement('div');
-      row.className = 'detail-log-entry';
-      const ts = document.createElement('span');
-      ts.className = 'detail-log-ts';
-      ts.textContent = fdt(entry.ts);
-      const txt = document.createElement('span');
-      txt.className = 'detail-log-text';
-      txt.textContent = entry.text;
-      row.append(ts, txt);
-      logEl.appendChild(row);
+      const row = node('div', 'detail-log-entry');
+      row.append(
+        node('span', 'detail-log-ts', fdt(entry.ts)),
+        node('span', 'detail-log-text', entry.text)
+      );
+      log.append(row);
     });
   }
-
-  // Compose (live items only)
-  const composeEl = document.getElementById('detail-log-compose');
-  composeEl.innerHTML = '';
+  const compose = document.getElementById('detail-log-compose');
+  compose.replaceChildren();
   if (!it.archivedAt) {
-    const input = document.createElement('input');
-    input.className = 'detail-log-input';
-    input.placeholder = 'STATUS UPDATE…';
-    input.autocomplete = 'off';
-    const btn = document.createElement('button');
-    btn.className = 'dact';
-    btn.textContent = 'STATUS UPDATE';
+    const input = node('input', 'detail-log-input');
+    input.placeholder = 'Add a status update…';
+    input.setAttribute('aria-label', 'Status update');
     const submit = () => {
-      const text = input.value.trim();
-      if (!text) return;
-      Actions.addLogEntry(it.id, text);
+      if (input.value.trim()) Actions.addLogEntry(it.id, input.value.trim());
     };
-    btn.onclick = submit;
     input.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter') submit();
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        submit();
+      }
     });
-    composeEl.append(input, btn);
+    compose.append(input, button('Add update', submit));
   }
 }
-
 function renderList() {
-  const list = document.getElementById('list'),
-    em = document.getElementById('empty-msg');
+  const list = document.getElementById('list');
   list.querySelectorAll('.contact-row').forEach((el) => el.remove());
   const items = visibleList();
+  const empty = document.getElementById('empty-msg');
+  empty.hidden = items.length > 0;
+  empty.replaceChildren();
   if (!items.length) {
-    em.style.display = 'block';
-    em.textContent = Store.ui.search
-      ? '— NO MATCHING CONTACTS —'
-      : Store.ui.view === 'live'
-        ? Store.ui.filter === 'review'
-          ? '— NOTHING NEEDS REVIEW —'
-          : '— NO CONTACTS ON SCOPE —'
-        : '— ARCHIVE LOG EMPTY —';
-    return;
+    const today = Store.ui.view === 'today';
+    empty.append(
+      node('span', 'empty-symbol', '◈'),
+      node(
+        'h2',
+        '',
+        today
+          ? 'You’re up to date.'
+          : Store.ui.search || Store.ui.filter !== 'all'
+            ? 'No matching projects.'
+            : Store.ui.view === 'archive'
+              ? 'Your archive is empty.'
+              : 'A clear radar.'
+      ),
+      node(
+        'p',
+        '',
+        today
+          ? 'Nothing is due for review or follow-up today. Your other projects are in All.'
+          : 'Keep track of what matters, at your own pace.'
+      )
+    );
+    if (today) empty.append(button('See all projects', () => switchView('all'), 'quiet'));
   }
-  em.style.display = 'none';
   items.forEach((item) => {
-    const sel = Store.ui.sel === item.id,
-      stale = isStale(item);
-    const row = document.createElement('div');
-    row.className = 'contact-row';
-    if (sel) {
-      row.style.borderLeftColor = PC[item.priority];
-      row.style.background = '#020e0720';
-    }
+    const row = node('button', 'contact-row' + (Store.ui.sel === item.id ? ' selected' : ''));
+    row.type = 'button';
+    row.setAttribute('aria-expanded', String(Store.ui.sel === item.id));
+    row.setAttribute('aria-controls', 'detail-panel');
     row.addEventListener('click', () => {
-      Store.ui.sel = sel ? null : item.id;
+      Store.ui.sel = Store.ui.sel === item.id ? null : item.id;
+      Store.ui.showForm = false;
       render();
+      if (Store.ui.sel) document.getElementById('detail-close').focus();
     });
-    const main = document.createElement('div');
-    main.className = 'contact-main';
-    const left = document.createElement('div');
-    left.className = 'contact-left';
-    const dot = document.createElement('div');
-    dot.className = 'contact-dot';
-    dot.style.background = item.archivedAt ? '#546e7a' : PC[item.priority];
-    const name = document.createElement('span');
-    name.className = 'contact-name';
-    name.textContent = item.name.toUpperCase();
-    if (sel) name.style.color = '#69f0ae';
-    left.append(dot, name);
-    const right = document.createElement('div');
-    right.className = 'contact-right';
-    if (!item.archivedAt && stale) {
-      const r = document.createElement('span');
-      r.className = 'stale-tag';
-      r.textContent = '⚠' + daysSince(item.reviewedAt) + 'd';
-      right.appendChild(r);
-    }
-    if (item.category) {
-      const c = document.createElement('span');
-      c.style.color = '#1a4d2e';
-      c.textContent = item.category.toUpperCase();
-      right.appendChild(c);
-    }
-    const st = document.createElement('span');
-    st.style.color = item.archivedAt ? '#546e7a' : SC[item.status];
-    st.textContent = item.archivedAt ? 'ARCH' : item.status.toUpperCase().slice(0, 3);
-    right.appendChild(st);
-    const pr = document.createElement('span');
-    pr.style.color = PC[item.priority];
-    pr.textContent = item.priority.toUpperCase().slice(0, 4);
-    right.appendChild(pr);
+    const main = node('div', 'contact-main');
+    const left = node('div', 'contact-left');
+    const dot = node('span', 'contact-dot');
+    dot.style.background = item.archivedAt ? '#79958b' : PC[item.priority];
+    left.append(dot, node('span', 'contact-name', item.name));
+    const right = node('span', 'contact-right', item.archivedAt ? 'Archived' : item.status);
     main.append(left, right);
-    row.appendChild(main);
-    if (item.notes) {
-      const n = document.createElement('div');
-      n.className = 'contact-notes';
-      n.textContent = item.notes;
-      row.appendChild(n);
-    }
-    list.appendChild(row);
+    row.append(main);
+    const context = [
+      item.category,
+      item.waitingOn ? 'Waiting on ' + item.waitingOn : item.checkpoint || item.notes,
+    ]
+      .filter(Boolean)
+      .join(' · ');
+    if (context) row.append(node('div', 'contact-context', context));
+    const reasons = item.archivedAt ? [] : D.attentionReasons(item);
+    if (reasons.length) row.append(node('div', 'attention-reasons', reasons.join(' · ')));
+    else if (!item.archivedAt)
+      row.append(node('div', 'upcoming', 'Next review: ' + dateLabel(D.reviewDate(item))));
+    list.append(row);
   });
 }
-
 function render() {
-  renderStats();
-  document
-    .querySelectorAll('.tab')
-    .forEach((t) => t.classList.toggle('active', t.dataset.view === Store.ui.view));
-  document.getElementById('filters').style.display = Store.ui.view === 'live' ? 'flex' : 'none';
-  document
-    .querySelectorAll('.filter-btn')
-    .forEach((b) => b.classList.toggle('active', b.dataset.filter === Store.ui.filter));
-  document.getElementById('footer').style.display = Store.ui.view === 'live' ? 'flex' : 'none';
-  document.getElementById('form-panel').style.display = Store.ui.showForm ? 'block' : 'none';
-  renderBlips();
-  renderDetail();
+  const today = Store.ui.view === 'today';
+  const archive = Store.ui.view === 'archive';
+  document.getElementById('today-count').textContent = stripTombstones(Store.items).filter((i) =>
+    D.isDueToday(i)
+  ).length;
+  document.querySelectorAll('.tab').forEach((t) => {
+    const active = t.dataset.view === Store.ui.view || (archive && t.dataset.view === 'all');
+    t.classList.toggle('active', active);
+    t.setAttribute('aria-pressed', String(active));
+  });
+  document.getElementById('all-controls').hidden = today;
+  document.getElementById('filter').hidden = archive;
+  document.getElementById('archive-btn').hidden = today;
+  document.getElementById('archive-btn').textContent = archive ? '← All projects' : 'Archive';
+  document.getElementById('view-title').textContent = today
+    ? "Today's radar"
+    : archive
+      ? 'Archive'
+      : 'All projects';
+  document.getElementById('view-subtitle').textContent = today
+    ? 'What needs your attention, and why.'
+    : archive
+      ? 'Finished for now. Restore a project whenever you need it.'
+      : 'Everything you’re keeping in sight.';
+  document.getElementById('view-date').textContent = new Date().toLocaleDateString(undefined, {
+    weekday: 'short',
+    month: 'short',
+    day: 'numeric',
+  });
+  document.getElementById('form-panel').hidden = !Store.ui.showForm;
   renderList();
+  renderDetail();
+}
+function switchView(view) {
+  Store.ui.view = view;
+  Store.ui.sel = null;
+  Store.ui.search = '';
+  Store.ui.filter = 'all';
+  document.getElementById('search').value = '';
+  document.getElementById('filter').value = 'all';
+  render();
+}
+function focusSearch() {
+  if (Store.ui.view !== 'all') switchView('all');
+  document.getElementById('search').focus();
 }
 
 /* ---------- Form ---------- */
@@ -794,8 +820,9 @@ function setSeg(group, val) {
     b.classList.toggle('active-seg', on);
     const col = group === 'priority' ? PC[b.dataset.val] : SC[b.dataset.val];
     b.style.background = on ? col + '18' : 'none';
-    b.style.borderColor = on ? col : '#0f2816';
-    b.style.color = on ? col : '#1a4d2e';
+    b.style.borderColor = on ? col : '#294238';
+    b.style.color = on ? col : '#a5bbb0';
+    b.setAttribute('aria-pressed', String(on));
   });
 }
 function getSeg(group) {
@@ -810,11 +837,12 @@ function openAdd() {
   Store.ui.showForm = true;
   Store.ui.editId = null;
   Store.ui.sel = null;
-  document.getElementById('form-label').textContent = '◈ NEW CONTACT ACQUISITION';
-  document.getElementById('form-save').textContent = 'ACQUIRE  (↵)';
+  document.getElementById('form-label').textContent = 'New project';
+  document.getElementById('form-save').textContent = 'Create project';
   document.getElementById('f-name').value = '';
   document.getElementById('f-cat').value = '';
   document.getElementById('f-notes').value = '';
+  fillSchedule({ reviewIntervalDays: 14 });
   setSeg('status', 'active');
   setSeg('priority', 'medium');
   render();
@@ -823,15 +851,33 @@ function openAdd() {
 function openEdit(it) {
   Store.ui.showForm = true;
   Store.ui.editId = it.id;
-  document.getElementById('form-label').textContent = '◈ MODIFY CONTACT';
-  document.getElementById('form-save').textContent = 'UPDATE  (↵)';
+  document.getElementById('form-label').textContent = 'Edit project';
+  document.getElementById('form-save').textContent = 'Save changes';
   document.getElementById('f-name').value = it.name;
   document.getElementById('f-cat').value = it.category || '';
   document.getElementById('f-notes').value = it.notes || '';
+  fillSchedule(it);
   setSeg('status', it.status);
   setSeg('priority', it.priority);
   render();
   setTimeout(() => document.getElementById('f-name').focus(), 40);
+}
+function fillSchedule(it) {
+  const interval = it.reviewIntervalDays;
+  document.getElementById('f-rhythm').value =
+    interval === null ? 'manual' : [3, 7, 14, 30].includes(interval) ? String(interval) : 'custom';
+  document.getElementById('f-interval').value = interval || 14;
+  document.getElementById('f-review').value = it.nextReviewOn || '';
+  document.getElementById('f-waiting').value = it.waitingOn || '';
+  document.getElementById('f-checkpoint').value = it.checkpoint || '';
+  document.getElementById('f-checkpoint-date').value = it.checkpointOn || '';
+  updateRhythm();
+}
+function updateRhythm() {
+  const custom = document.getElementById('f-rhythm').value === 'custom';
+  document.getElementById('custom-rhythm').hidden = !custom;
+  document.getElementById('f-interval').disabled = !custom;
+  document.getElementById('f-interval').required = custom;
 }
 function closeForm() {
   Store.ui.showForm = false;
@@ -839,37 +885,59 @@ function closeForm() {
   render();
 }
 function saveForm() {
+  if (!document.getElementById('form-panel').reportValidity()) return;
+  const rhythm = document.getElementById('f-rhythm').value;
   const v = {
     name: document.getElementById('f-name').value.trim(),
     category: document.getElementById('f-cat').value.trim(),
     notes: document.getElementById('f-notes').value.trim(),
     status: getSeg('status') || 'active',
     priority: getSeg('priority') || 'medium',
+    reviewIntervalDays:
+      rhythm === 'manual'
+        ? null
+        : Number(rhythm === 'custom' ? document.getElementById('f-interval').value : rhythm),
+    nextReviewOn: document.getElementById('f-review').value,
+    waitingOn: document.getElementById('f-waiting').value.trim(),
+    checkpoint: document.getElementById('f-checkpoint').value.trim(),
+    checkpointOn: document.getElementById('f-checkpoint-date').value,
   };
   if (!v.name) {
     document.getElementById('f-name').focus();
     return;
   }
   if (Store.ui.editId) Actions.update(Store.ui.editId, v);
-  else Actions.add(v);
+  else {
+    Actions.add(v);
+    Store.ui.sel = Store.items[Store.items.length - 1].id;
+  }
   closeForm();
 }
 
 /* ---------- Wiring ---------- */
 function wire() {
-  document.querySelectorAll('.tab').forEach((t) =>
-    t.addEventListener('click', () => {
-      Store.ui.view = t.dataset.view;
-      Store.ui.sel = null;
-      render();
-    })
-  );
-  document.querySelectorAll('.filter-btn').forEach((b) =>
-    b.addEventListener('click', () => {
-      Store.ui.filter = b.dataset.filter;
-      render();
-    })
-  );
+  document
+    .querySelectorAll('.tab')
+    .forEach((t) => t.addEventListener('click', () => switchView(t.dataset.view)));
+  document
+    .getElementById('archive-btn')
+    .addEventListener('click', () => switchView(Store.ui.view === 'archive' ? 'all' : 'archive'));
+  document.getElementById('filter').addEventListener('change', (e) => {
+    Store.ui.filter = e.target.value;
+    renderList();
+  });
+  document.getElementById('detail-close').addEventListener('click', () => {
+    Store.ui.sel = null;
+    render();
+  });
+  document.getElementById('f-rhythm').addEventListener('change', () => {
+    updateRhythm();
+    document.getElementById('f-review').value = '';
+  });
+  document.getElementById('f-interval').addEventListener('input', () => {
+    document.getElementById('f-review').value = '';
+  });
+  document.getElementById('browser-menu').hidden = HAS_API;
   document
     .querySelectorAll('.seg-btn')
     .forEach((b) => b.addEventListener('click', () => setSeg(b.dataset.group, b.dataset.val)));
@@ -883,9 +951,9 @@ function wire() {
   });
   document.getElementById('add-btn').addEventListener('click', openAdd);
   document.getElementById('form-abort').addEventListener('click', closeForm);
-  document.getElementById('form-save').addEventListener('click', saveForm);
-  document.getElementById('f-name').addEventListener('keydown', (e) => {
-    if (e.key === 'Enter') saveForm();
+  document.getElementById('form-panel').addEventListener('submit', (e) => {
+    e.preventDefault();
+    saveForm();
   });
   document.getElementById('export-json-btn').addEventListener('click', () => Actions.exportJSON());
   document.getElementById('export-pdf-btn').addEventListener('click', () => Actions.exportPDF());
@@ -937,7 +1005,7 @@ function wire() {
       }
       return;
     }
-    if (typing) return;
+    if (typing || e.ctrlKey || e.metaKey || e.altKey || e.repeat) return;
     const sel = [...stripTombstones(Store.items), ...stripTombstones(Store.arch)].find(
       (i) => i.id === Store.ui.sel
     );
@@ -946,9 +1014,9 @@ function wire() {
       openAdd();
     } else if (e.key === '/') {
       e.preventDefault();
-      document.getElementById('search').focus();
+      focusSearch();
     } else if ((e.key === 'e' || e.key === 'E') && sel && !sel.archivedAt) openEdit(sel);
-    else if ((e.key === 'p' || e.key === 'P') && sel && !sel.archivedAt) Actions.ping(sel.id);
+    else if (['r', 'R', 'p', 'P'].includes(e.key) && sel && !sel.archivedAt) Actions.review(sel.id);
     else if ((e.key === 'a' || e.key === 'A') && sel && !sel.archivedAt) Actions.archive(sel.id);
   });
 
@@ -956,7 +1024,7 @@ function wire() {
   if (HAS_API && window.radarAPI.onMenu) {
     window.radarAPI.onMenu((action) => {
       if (action === 'new') openAdd();
-      else if (action === 'search') document.getElementById('search').focus();
+      else if (action === 'search') focusSearch();
       else if (action === 'export') Actions.exportJSON();
       else if (action === 'exportPDF') Actions.exportPDF();
       else if (action === 'import') Actions.importJSON();
@@ -965,54 +1033,28 @@ function wire() {
     });
   }
 
-  window.addEventListener('focus', render); // re-evaluate staleness across days
-}
-
-/* ---------- Animation + decoration ---------- */
-function startClock() {
-  const tick = () => {
-    document.getElementById('clock').textContent = new Date().toISOString().slice(11, 19) + 'Z';
-  };
-  setInterval(tick, 1000);
-  tick();
-}
-function startSweep() {
-  let sweep = 0;
-  const ln = document.getElementById('sweep-line');
-  (function loop() {
-    sweep = (sweep + 1.5) % 360;
-    const rad = ((sweep - 90) * Math.PI) / 180;
-    ln.setAttribute('x2', CX + Math.cos(rad) * R);
-    ln.setAttribute('y2', CY + Math.sin(rad) * R);
-    document.querySelectorAll('.blip-rect').forEach((el) => {
-      const diff = (sweep - parseFloat(el.dataset.deg) + 360) % 360;
-      el.setAttribute('fill-opacity', diff < 22 && diff > 0 ? '0.85' : '0.55');
+  let renderedDay = D.localDate();
+  const refreshAttention = () => {
+    document.getElementById('today-count').textContent = stripTombstones(Store.items).filter((i) =>
+      D.isDueToday(i)
+    ).length;
+    document.getElementById('view-date').textContent = new Date().toLocaleDateString(undefined, {
+      weekday: 'short',
+      month: 'short',
+      day: 'numeric',
     });
-    requestAnimationFrame(loop);
-  })();
-}
-function drawTicks() {
-  const g = document.getElementById('ticks');
-  for (let d = 0; d < 360; d += 30) {
-    const rad = ((d - 90) * Math.PI) / 180,
-      inner = R * 0.95;
-    const l = document.createElementNS(SVGNS, 'line');
-    l.setAttribute('x1', CX + Math.cos(rad) * inner);
-    l.setAttribute('y1', CY + Math.sin(rad) * inner);
-    l.setAttribute('x2', CX + Math.cos(rad) * R);
-    l.setAttribute('y2', CY + Math.sin(rad) * R);
-    l.setAttribute('stroke', '#152e1a');
-    l.setAttribute('stroke-width', '1');
-    g.appendChild(l);
-  }
+    renderList(); // Keep any draft form, review choice, or activity update intact.
+    renderedDay = D.localDate();
+  };
+  window.addEventListener('focus', refreshAttention);
+  setInterval(() => {
+    if (renderedDay !== D.localDate()) refreshAttention();
+  }, 30000);
 }
 
 /* ---------- Boot ---------- */
 (async function boot() {
-  drawTicks();
   wire();
-  startClock();
-  startSweep();
   Auth.init().catch((err) => console.error('Auth.init failed', err));
   Sync.init();
   SyncConfigPrompt.init().catch((err) => console.error('SyncConfigPrompt.init failed', err));

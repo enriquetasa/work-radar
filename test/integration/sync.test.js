@@ -481,3 +481,87 @@ test('synced_at works as a pull cursor: only rows changed after it come back', a
     'the row changed before (or at) the cursor must not be pulled'
   );
 });
+
+test('schedules survive legacy edits, reject stale changes, and explicitly clear', async () => {
+  const now = Date.now();
+  const item = await pushAcceptedItem(userA.client, {
+    reviewIntervalDays: 7,
+    nextReviewOn: '2026-10-01',
+    waitingOn: 'Alex',
+    checkpoint: 'Budget decision',
+    checkpointOn: '2026-09-28',
+    updatedAt: iso(now),
+  });
+  const read = async () => {
+    const { data, error } = await userA.client
+      .from('items')
+      .select('review_interval_days, next_review_on, waiting_on, checkpoint, checkpoint_on')
+      .eq('id', item.id)
+      .single();
+    assert.equal(error, null);
+    return data;
+  };
+  const expected = {
+    review_interval_days: 7,
+    next_review_on: '2026-10-01',
+    waiting_on: 'Alex',
+    checkpoint: 'Budget decision',
+    checkpoint_on: '2026-09-28',
+  };
+  assert.deepEqual(await read(), expected);
+
+  // An older app knows none of the schedule keys; its newer title edit
+  // must leave all schedule data intact.
+  await pushAcceptedItem(userA.client, {
+    id: item.id,
+    name: 'Edited by old app',
+    updatedAt: iso(now + 1000),
+  });
+  assert.deepEqual(await read(), expected);
+
+  const { data: stale, error: staleError } = await userA.client.rpc('push_items', {
+    items: [{ ...item, updatedAt: iso(now), reviewIntervalDays: 1 }],
+  });
+  assert.equal(staleError, null);
+  assert.equal(stale[0].accepted, false);
+  assert.deepEqual(await read(), expected);
+
+  await pushAcceptedItem(userA.client, {
+    id: item.id,
+    updatedAt: iso(now + 2000),
+    reviewIntervalDays: null,
+    nextReviewOn: '',
+    waitingOn: null,
+    checkpoint: '',
+    checkpointOn: null,
+  });
+  assert.deepEqual(await read(), {
+    review_interval_days: null,
+    next_review_on: null,
+    waiting_on: '',
+    checkpoint: '',
+    checkpoint_on: null,
+  });
+});
+
+test('legacy inserts use fortnightly reviews; invalid cadence does not abort a batch', async () => {
+  const good = itemPayload({ name: 'Legacy default' });
+  const bad = itemPayload({ reviewIntervalDays: 0 });
+  const { data, error } = await userA.client.rpc('push_items', { items: [bad, good] });
+  assert.equal(error, null);
+  assert.equal(data[0].accepted, false);
+  assert.equal(data[1].accepted, true);
+  const { data: row, error: readError } = await userA.client
+    .from('items')
+    .select('review_interval_days, next_review_on, waiting_on, checkpoint, checkpoint_on')
+    .eq('id', good.id)
+    .single();
+  assert.equal(readError, null);
+  assert.deepEqual(row, {
+    review_interval_days: 14,
+    next_review_on: null,
+    waiting_on: '',
+    checkpoint: '',
+    checkpoint_on: null,
+  });
+});

@@ -16,7 +16,26 @@ function emptyData() {
 }
 
 function buildDefaultPushRpc(client, fnName, argKey) {
+  let scheduleSchemaChecked = false;
   return async (rows) => {
+    // Older push_items RPCs accept unknown JSON keys but silently discard
+    // them. Verify the schedule migration before acknowledging any writes.
+    // Cache success only, so a deployment fixes a failed check on retry.
+    if (fnName === 'push_items' && !scheduleSchemaChecked) {
+      const { error } = await client
+        .from('items')
+        .select('review_interval_days, next_review_on, waiting_on, checkpoint, checkpoint_on')
+        .limit(0);
+      if (error) {
+        if (error.code === '42703' || error.code === 'PGRST204') {
+          throw new Error('Cloud sync requires the project review schedule database migration.', {
+            cause: error,
+          });
+        }
+        throw error;
+      }
+      scheduleSchemaChecked = true;
+    }
     const { data, error } = await client.rpc(fnName, { [argKey]: rows });
     if (error) throw error;
     return data;

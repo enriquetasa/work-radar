@@ -12,237 +12,187 @@
   </head>
   <body>
     <div id="app">
-      <div id="header">
-        <div id="header-left">
-          <span id="header-title"><span class="blink">◈</span> WORK RADAR</span>
-          <span id="header-sub">SITUATIONAL AWARENESS</span>
+      <header id="header">
+        <div id="brand">
+          <span id="header-title">◈ WORK RADAR</span
+          ><span id="header-sub">A little space to keep things in sight.</span>
+        </div>
+        <div id="header-tools">
           <div id="auth-panel" hidden>
             <form id="auth-form" hidden>
               <input
                 id="auth-email"
                 type="email"
-                placeholder="EMAIL FOR SYNC"
+                aria-label="Email for cloud sync"
+                placeholder="Email for sync"
                 autocomplete="email"
-              />
-              <button type="submit" id="auth-submit" class="tool-btn">SIGN IN</button>
+              /><button type="submit" id="auth-submit" class="tool-btn">Sign in</button>
             </form>
-            <span id="auth-pending" class="auth-status" hidden>◈ CHECK YOUR INBOX</span>
+            <span id="auth-pending" class="auth-status" hidden>Check your inbox</span>
             <span id="auth-signed-in" class="auth-status" hidden
-              >◈ SIGNED IN AS <strong id="auth-email-label"></strong
+              ><strong id="auth-email-label"></strong
             ></span>
-            <span id="auth-error" class="auth-status auth-error" hidden></span>
-            <span id="sync-status" class="auth-status" hidden></span>
+            <span id="auth-error" class="auth-status auth-error" role="alert" hidden></span>
           </div>
+          <span id="sync-status" class="auth-status" role="status" hidden></span>
+          <details id="browser-menu" hidden>
+            <summary aria-label="App menu">•••</summary>
+            <div class="menu-items">
+              <button id="export-pdf-btn">Export PDF report</button
+              ><button id="export-json-btn">Export JSON backup</button
+              ><button id="import-btn">Import JSON</button>
+            </div>
+          </details>
+          <button id="add-btn" class="primary">+ New project</button>
         </div>
-        <div id="stats">
-          <span id="backup-warn">⚠ BACKUP DUE</span>
-          <span class="stat">CRIT <strong id="s-crit" class="c-crit">0</strong></span>
-          <span class="stat">HIGH <strong id="s-high" class="c-high">0</strong></span>
-          <span class="stat">REVIEW <strong id="s-review" class="c-high">0</strong></span>
-          <span class="stat">LIVE <strong id="s-live" class="c-green">0</strong></span>
-          <span class="stat">ARCH <strong id="s-arch" class="c-dorm">0</strong></span>
-          <span id="clock"></span>
-        </div>
-      </div>
-
-      <div id="toolbar">
+      </header>
+      <nav id="toolbar" aria-label="Project views">
         <div id="tabs">
-          <button class="tab active" data-view="live">◉ LIVE</button>
-          <button class="tab" data-view="archive">⊙ ARCHIVE</button>
+          <button class="tab active" data-view="today" aria-pressed="true">
+            Today <span id="today-count">0</span></button
+          ><button class="tab" data-view="all" aria-pressed="false">All</button>
         </div>
-        <div id="search-wrap">
-          <input id="search" placeholder="SEARCH CONTACTS  ( / )" autocomplete="off" />
-        </div>
-        <div id="filters">
-          <button class="filter-btn active" data-filter="all">ALL</button>
-          <button class="filter-btn" data-filter="active">ACTIVE</button>
-          <button class="filter-btn" data-filter="watch">WATCH</button>
-          <button class="filter-btn" data-filter="dormant">DORMANT</button>
-          <button class="filter-btn" data-filter="review">REVIEW</button>
-        </div>
-        <select id="sort" title="Sort order">
-          <option value="priority">SORT: PRIORITY</option>
-          <option value="stale">SORT: STALENESS</option>
-          <option value="name">SORT: NAME</option>
-          <option value="recent">SORT: RECENT</option>
+        <button id="archive-btn" class="quiet" hidden>Archive</button>
+      </nav>
+      <div id="all-controls" hidden>
+        <input
+          id="search"
+          aria-label="Search projects"
+          placeholder="Search projects…  /"
+          autocomplete="off"
+        />
+        <select id="filter" aria-label="Filter by status">
+          <option value="all">All statuses</option>
+          <option value="active">Active</option>
+          <option value="watch">Watch</option>
+          <option value="dormant">Dormant</option>
+          <option value="review">Review due</option>
         </select>
-        <button class="tool-btn" id="export-json-btn" title="Save a JSON backup">↓ JSON</button>
-        <button class="tool-btn" id="export-pdf-btn" title="Export PDF report for supervisors">
-          ↓ PDF
-        </button>
-        <button class="tool-btn" id="import-btn" title="Merge a JSON backup">↑ IMPORT</button>
-        <input type="file" id="import-file" accept="application/json,.json" />
+        <select id="sort" aria-label="Sort projects">
+          <option value="priority">Priority</option>
+          <option value="stale">Review date</option>
+          <option value="name">Name</option>
+          <option value="recent">Recently added</option>
+        </select>
       </div>
-
-      <div id="body">
-        <div id="radar-panel">
-          <div id="radar-label">SPATIAL DISPLAY</div>
-          <svg id="radar-svg" viewBox="0 0 256 256">
-            <rect width="256" height="256" fill="#010805" />
-            <line x1="128" y1="15" x2="128" y2="241" stroke="#0c1f0e" stroke-width="1" />
-            <line x1="15" y1="128" x2="241" y2="128" stroke="#0c1f0e" stroke-width="1" />
-            <line x1="51" y1="51" x2="205" y2="205" stroke="#091a0b" stroke-width="1" />
-            <line x1="205" y1="51" x2="51" y2="205" stroke="#091a0b" stroke-width="1" />
-            <circle cx="128" cy="128" r="110" fill="none" stroke="#1a3d22" stroke-width="1" />
-            <circle
-              cx="128"
-              cy="128"
-              r="67"
-              fill="none"
-              stroke="#0c1f0e"
-              stroke-width="1"
-              stroke-dasharray="3 5"
-            />
-            <circle
-              cx="128"
-              cy="128"
-              r="34"
-              fill="none"
-              stroke="#0c1f0e"
-              stroke-width="1"
-              stroke-dasharray="3 5"
-            />
-            <g id="ticks"></g>
-            <text
-              x="128"
-              y="10"
-              fill="#1a3d22"
-              font-size="7"
-              text-anchor="middle"
-              dominant-baseline="middle"
-            >
-              N
-            </text>
-            <text
-              x="246"
-              y="128"
-              fill="#1a3d22"
-              font-size="7"
-              text-anchor="middle"
-              dominant-baseline="middle"
-            >
-              E
-            </text>
-            <text
-              x="128"
-              y="246"
-              fill="#1a3d22"
-              font-size="7"
-              text-anchor="middle"
-              dominant-baseline="middle"
-            >
-              S
-            </text>
-            <text
-              x="10"
-              y="128"
-              fill="#1a3d22"
-              font-size="7"
-              text-anchor="middle"
-              dominant-baseline="middle"
-            >
-              W
-            </text>
-            <text x="165" y="126" fill="#0c1f0e" font-size="6" text-anchor="start">ACT</text>
-            <text x="198" y="126" fill="#0c1f0e" font-size="6" text-anchor="start">WCH</text>
-            <text x="226" y="126" fill="#0c1f0e" font-size="6" text-anchor="start">DRM</text>
-            <line
-              id="sweep-line"
-              x1="128"
-              y1="128"
-              x2="128"
-              y2="18"
-              stroke="#00e676"
-              stroke-width="1.5"
-              stroke-opacity="0.55"
-            />
-            <g id="blips"></g>
-            <circle cx="128" cy="128" r="2.5" fill="#00e676" fill-opacity="0.7" />
-          </svg>
-          <div id="radar-legend">
-            <div id="legend-priority">
-              <div class="lp">
-                <div class="lp-dot" style="background: #f44336"></div>
-                CRIT
-              </div>
-              <div class="lp">
-                <div class="lp-dot" style="background: #ff9100"></div>
-                HIGH
-              </div>
-              <div class="lp">
-                <div class="lp-dot" style="background: #00e676"></div>
-                MEDI
-              </div>
-              <div class="lp">
-                <div class="lp-dot" style="background: #26c6da"></div>
-                LOW
-              </div>
+      <main id="body">
+        <section id="list-panel" aria-labelledby="view-title">
+          <div id="view-heading">
+            <div>
+              <h1 id="view-title">Today's radar</h1>
+              <p id="view-subtitle">What needs your attention, and why.</p>
             </div>
-            <div id="legend-rings">
-              <div>◈ inner ring → ACTIVE</div>
-              <div>◈ mid ring → WATCH</div>
-              <div>◈ outer ring → DORMANT</div>
-              <div class="c-high">◈ amber halo → NEEDS REVIEW</div>
-            </div>
+            <span id="view-date"></span>
           </div>
-        </div>
-
-        <div id="right-panel">
-          <div id="detail-panel">
+          <div id="list"><div id="empty-msg" role="status"></div></div>
+        </section>
+        <aside id="inspector" hidden>
+          <section id="detail-panel" aria-label="Project details" hidden>
             <div id="detail-header">
               <div>
-                <div id="detail-name"></div>
+                <h2 id="detail-name"></h2>
                 <div id="detail-meta"></div>
               </div>
-              <div id="detail-actions"></div>
+              <button id="detail-close" class="quiet" aria-label="Close project details">✕</button>
             </div>
+            <div id="detail-context"></div>
             <div id="detail-notes"></div>
+            <div id="detail-schedule"></div>
+            <div id="detail-actions"></div>
             <div id="detail-date"></div>
             <div id="detail-log"></div>
             <div id="detail-log-compose"></div>
-          </div>
-
-          <div id="form-panel">
-            <div id="form-label">◈ NEW CONTACT ACQUISITION</div>
+          </section>
+          <form id="form-panel" hidden>
+            <h2 id="form-label">New project</h2>
             <div id="form-fields">
-              <input id="f-name" placeholder="CALLSIGN / DESIGNATION *" autocomplete="off" />
-              <input
-                id="f-cat"
-                placeholder="SECTOR / CATEGORY  (e.g. OEES · LUMEN · PERSONAL)"
+              <label for="f-name">Project name <span class="required">*</span></label
+              ><input
+                id="f-name"
+                required
                 autocomplete="off"
+                placeholder="What are you keeping an eye on?"
               />
-              <div class="form-row">
-                <span class="form-row-label">STATUS</span>
-                <button class="seg-btn" data-group="status" data-val="active">ACTIVE</button>
-                <button class="seg-btn" data-group="status" data-val="watch">WATCH</button>
-                <button class="seg-btn" data-group="status" data-val="dormant">DORMANT</button>
+              <label for="f-cat">Category</label
+              ><input id="f-cat" autocomplete="off" placeholder="Team, area, or personal" />
+              <div class="form-row" role="group" aria-label="Project status">
+                <span class="form-row-label">Status</span
+                ><button type="button" class="seg-btn" data-group="status" data-val="active">
+                  Active</button
+                ><button type="button" class="seg-btn" data-group="status" data-val="watch">
+                  Watch</button
+                ><button type="button" class="seg-btn" data-group="status" data-val="dormant">
+                  Dormant
+                </button>
               </div>
-              <div class="form-row">
-                <span class="form-row-label">THREAT</span>
-                <button class="seg-btn" data-group="priority" data-val="critical">CRITICAL</button>
-                <button class="seg-btn" data-group="priority" data-val="high">HIGH</button>
-                <button class="seg-btn" data-group="priority" data-val="medium">MEDIUM</button>
-                <button class="seg-btn" data-group="priority" data-val="low">LOW</button>
+              <div class="form-row" role="group" aria-label="Project priority">
+                <span class="form-row-label">Priority</span
+                ><button type="button" class="seg-btn" data-group="priority" data-val="critical">
+                  Critical</button
+                ><button type="button" class="seg-btn" data-group="priority" data-val="high">
+                  High</button
+                ><button type="button" class="seg-btn" data-group="priority" data-val="medium">
+                  Medium</button
+                ><button type="button" class="seg-btn" data-group="priority" data-val="low">
+                  Low
+                </button>
               </div>
-              <textarea id="f-notes" placeholder="INTEL / NOTES (optional)" rows="2"></textarea>
+              <div class="field-grid">
+                <div>
+                  <label for="f-rhythm">Review rhythm</label
+                  ><select id="f-rhythm">
+                    <option value="3">Every 3 days</option>
+                    <option value="7">Weekly</option>
+                    <option value="14">Every 2 weeks</option>
+                    <option value="30">Every 30 days</option>
+                    <option value="custom">Custom interval</option>
+                    <option value="manual">Only when scheduled</option>
+                  </select>
+                </div>
+                <div id="custom-rhythm" hidden>
+                  <label for="f-interval">Every (days)</label
+                  ><input id="f-interval" type="number" min="1" max="3650" step="1" value="14" />
+                </div>
+                <div>
+                  <label for="f-review">Next review</label
+                  ><input id="f-review" type="date" aria-describedby="review-help" />
+                </div>
+              </div>
+              <p id="review-help" class="field-help">
+                Leave the date blank to use the review rhythm.
+              </p>
+              <label for="f-waiting">Waiting on</label
+              ><input
+                id="f-waiting"
+                autocomplete="off"
+                placeholder="A person, team, or event (optional)"
+              />
+              <label for="f-checkpoint">Next checkpoint</label
+              ><input
+                id="f-checkpoint"
+                autocomplete="off"
+                placeholder="What are you expecting to happen?"
+              />
+              <label for="f-checkpoint-date">Checkpoint / follow-up date</label
+              ><input id="f-checkpoint-date" type="date" aria-describedby="checkpoint-help" />
+              <p id="checkpoint-help" class="field-help">
+                Surfaces in Today when due, until you complete or reschedule it.
+              </p>
+              <label for="f-notes">Notes</label
+              ><textarea id="f-notes" placeholder="Useful context (optional)" rows="3"></textarea>
             </div>
             <div id="form-actions">
-              <button class="form-act" id="form-abort">ABORT (ESC)</button>
-              <button class="form-act primary" id="form-save">ACQUIRE (↵)</button>
+              <button type="button" class="form-act" id="form-abort">Cancel</button
+              ><button type="submit" class="form-act primary" id="form-save">Create project</button>
             </div>
-          </div>
-
-          <div id="list"><div id="empty-msg">— NO CONTACTS ON SCOPE —</div></div>
-
-          <div id="footer">
-            <button id="add-btn">+ ACQUIRE NEW CONTACT</button>
-            <span id="kbd-hint"
-              ><b>N</b> new · <b>/</b> search · <b>E</b> edit · <b>P</b> ping · <b>A</b> archive ·
-              <b>ESC</b> close</span
-            >
-          </div>
-        </div>
-      </div>
+          </form>
+        </aside>
+      </main>
+      <footer id="footer">
+        <span id="footer-copy">Keep the important things in sight.</span
+        ><span id="kbd-hint">N new · / search · E edit · R reviewed · Esc close</span>
+      </footer>
+      <input type="file" id="import-file" accept="application/json,.json" hidden />
     </div>
 
     <div

@@ -322,3 +322,74 @@ test('a multi-row push that shares one synced_at is paginated correctly one row 
     'every row of a batch sharing one synced_at must arrive even when paginating one row at a time'
   );
 });
+
+test('review schedules and independent checkpoints converge between two machines', async () => {
+  const t0 = Date.now();
+  const id = crypto.randomUUID();
+  const schedule = {
+    reviewIntervalDays: 7,
+    nextReviewOn: '2026-09-25',
+    waitingOn: 'Alex',
+    checkpoint: 'Budget decision',
+    checkpointOn: '2026-09-28',
+  };
+  const m1 = await createMachine({
+    schema: D.SCHEMA,
+    items: [item(id, schedule)],
+    arch: [],
+    lastExport: 0,
+  });
+  const m2 = await createMachine();
+  try {
+    await m1.engine.triggerNow();
+    await m2.engine.triggerNow();
+    const pulled = findItem(await readData(m2.dataFilePath), id);
+    assert.deepEqual(D.normalizeSchedule(pulled), schedule);
+
+    const reviewed = D.reviewItem(pulled, t0 + 1000, '2026-10-02');
+    await m2.engine.recordLocalSave({
+      schema: D.SCHEMA,
+      items: [reviewed],
+      arch: [],
+      lastExport: 0,
+    });
+    await m2.engine.triggerNow();
+    await m1.engine.triggerNow();
+    assert.deepEqual(D.normalizeSchedule(findItem(await readData(m1.dataFilePath), id)), {
+      ...schedule,
+      nextReviewOn: '2026-10-02',
+    });
+
+    const cleared = D.updateItem(
+      reviewed,
+      {
+        reviewIntervalDays: null,
+        nextReviewOn: '',
+        waitingOn: '',
+        checkpoint: '',
+        checkpointOn: '',
+      },
+      t0 + 2000
+    );
+    await m2.engine.recordLocalSave({
+      schema: D.SCHEMA,
+      items: [cleared],
+      arch: [],
+      lastExport: 0,
+    });
+    await m2.engine.triggerNow();
+    await m1.engine.triggerNow();
+    for (const machine of [m1, m2]) {
+      assert.deepEqual(D.normalizeSchedule(findItem(await readData(machine.dataFilePath), id)), {
+        reviewIntervalDays: null,
+        nextReviewOn: '',
+        waitingOn: '',
+        checkpoint: '',
+        checkpointOn: '',
+      });
+    }
+  } finally {
+    m1.engine.stop();
+    m2.engine.stop();
+  }
+});

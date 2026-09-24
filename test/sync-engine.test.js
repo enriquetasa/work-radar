@@ -2170,3 +2170,69 @@ test('recordLocalSave does not fail the save when only the outbox bookkeeping wr
     engine.stop();
   }
 });
+
+test('default pushes retain pending schedules until the cloud schema supports them', async () => {
+  const dir = await tmpDir();
+  const dataFilePath = path.join(dir, 'data.json');
+  const syncStateFilePath = path.join(dir, 'sync-state.json');
+  const client = makeClient('u1');
+  let migrated = false;
+  let checks = 0;
+  const pushed = [];
+  client.from = (table) => {
+    assert.equal(table, 'items');
+    return {
+      select(columns) {
+        assert.match(columns, /review_interval_days/);
+        assert.match(columns, /checkpoint_on/);
+        return {
+          async limit(count) {
+            assert.equal(count, 0);
+            checks++;
+            return {
+              error: migrated ? null : { code: '42703', message: 'column does not exist' },
+            };
+          },
+        };
+      },
+    };
+  };
+  client.rpc = async (name, { items }) => {
+    assert.equal(name, 'push_items');
+    pushed.push(...items);
+    return { data: items.map((row) => ({ row_id: row.id, accepted: true, reason: null })) };
+  };
+  await writeJsonFileAtomic(dataFilePath, {
+    schema: domain.SCHEMA,
+    items: [item('A', { waitingOn: 'Alex', checkpointOn: '2026-10-01' })],
+    arch: [],
+    lastExport: 0,
+  });
+  const engine = createSyncEngine({
+    client,
+    dataFilePath,
+    syncStateFilePath,
+    log: silentLog,
+    pushLogEntriesRpc: acceptAll(),
+    pullItemsPage: emptyPage,
+    pullLogEntriesPage: emptyPage,
+    backoffBaseMs: 60_000,
+  });
+  try {
+    await engine.triggerNow();
+    assert.equal(engine.getStatus(), 'error');
+    assert.equal(pushed.length, 0, 'the old RPC must never receive the scheduling data');
+    const pending = syncState.getUserState(await readJsonFile(syncStateFilePath), 'u1');
+    assert.deepEqual(pending.pendingItemIds, ['A']);
+
+    migrated = true;
+    await engine.triggerNow();
+    assert.equal(engine.getStatus(), 'synced');
+    assert.equal(pushed[0].waitingOn, 'Alex');
+    assert.equal(pushed[0].checkpointOn, '2026-10-01');
+    assert.equal(checks, 2, 'a failed capability check must be retried');
+  } finally {
+    engine.stop();
+    await fsp.rm(dir, { recursive: true, force: true });
+  }
+});

@@ -35,7 +35,7 @@ A single JSON file in the OS app-data directory:
 - **Windows:** `%APPDATA%\work-radar\work-radar-data.json`
 - **Linux:** `~/.config/work-radar/work-radar-data.json`
 
-Writes are atomic (temp file + rename), so a crash mid-save can't corrupt it. A dated snapshot is copied to `backups/` once per day on launch (last 30 kept). **Radar → Reveal Auto-Backups** opens that folder. **EXPORT** still writes a portable copy anywhere you choose — good for dropping into a synced folder.
+Writes are atomic (temp file + rename), so a crash mid-save can't corrupt it. A dated snapshot is copied to `backups/` once per day on launch (last 30 kept). **Radar → Reveal Auto-Backups** opens that folder. **Radar → Export JSON Backup…** still writes a portable copy anywhere you choose — good for dropping into a synced folder.
 
 Unlike the old single-file HTML version, this does **not** depend on browser storage or the file's path. Move the app, rename it, doesn't matter — the data directory is stable.
 
@@ -224,16 +224,47 @@ fake data only.
 
 ## Migrating from the browser version
 
-The old `work-radar.html` stored data in browser `localStorage`, which the Electron app can't read. To bring it over: open the old file, hit **EXPORT** to get a JSON backup, then in the Electron app hit **IMPORT** and select it. Merge is non-destructive: for a matching ID, whichever side was edited more recently wins; everything else is added.
+The old `work-radar.html` stored data in browser `localStorage`, which the Electron app can't read. To bring it over: open the old file, hit **EXPORT** to get a JSON backup, then in the Electron app choose **Radar → Import Backup…** and select it. Merge is non-destructive: for a matching ID, whichever side was edited more recently wins; everything else is added.
+
+## Daily use
+
+The app opens in **Today**, a quiet briefing of projects whose review or checkpoint is due
+on or before today. Each row explains why it appears. Priority alone does not put a project
+in Today, and an empty briefing means nothing is scheduled for attention.
+
+**All** contains every live project, with search, status filters, sorting, and access to
+the archive. Select a project to see its notes, activity history, and review controls.
+The dark radar aesthetic remains, with a compact header and no spatial radar graphic.
+
+Projects can have a review rhythm (a number of days, or manual review), a specific next
+review date, a **Waiting on** person/team/event, and a **Next checkpoint** with an optional
+date. Existing projects retain their 14-day review rhythm. Dates use the local calendar,
+so a checkpoint due today appears throughout today, independent of its creation time.
+
+**Reviewed** records a review and schedules the next one using that project's rhythm.
+A custom next date overrides that occurrence. Snoozing changes the review date without
+marking the project reviewed. Neither action clears a checkpoint: complete or edit it
+separately when the expected event happens. Waiting-on text without a date does not itself
+add a project to Today. Blank next-review dates use the rhythm; manual rhythm without a
+specific next date disables scheduled reviews.
+
+JSON export, import, PDF reporting, and automatic backup access live in the **Radar**
+application menu. Daily local backups continue automatically alongside optional cloud sync.
+
+### Sync upgrade
+
+Apply the new scheduling migration in `supabase/migrations` to your Supabase project before
+using these fields across machines (`npx supabase db push` for your linked project).
+It adds review rhythm/date, waiting-on, and checkpoint fields and updates `push_items`.
+The migration is additive; older clients' omitted scheduling fields are preserved by the
+server when updating a project. Until the migration is applied, sync reports an error and keeps
+pending changes on the device rather than sending them to a server that cannot store the new fields.
+Upgrade your other clients to edit the new fields.
 
 ## Keyboard
 
-`Cmd/Ctrl+N` new · `Cmd/Ctrl+F` search · `Cmd/Ctrl+E` export · `Cmd/Ctrl+I` import
-In-window: `N` `/` `E` (edit) `P` (ping) `A` (archive) `Esc`
-
-## Staleness model
-
-Anything you haven't **PINGED** in 14 days flags `NEEDS REVIEW` — amber halo on the radar, a count in the header, a dedicated REVIEW filter. PING resets the clock. Change the window in `renderer/domain.js`: `const STALE_DAYS = 14;`
+`Cmd/Ctrl+N` new · `Cmd/Ctrl+F` search All · `Cmd/Ctrl+E` export · `Cmd/Ctrl+I` import
+In-window: `N` new · `/` search All · `E` edit · `R` (or `P`) reviewed · `A` archive · `Esc` close
 
 ## Development
 

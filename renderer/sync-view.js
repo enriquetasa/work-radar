@@ -18,10 +18,10 @@
 
 (function (root) {
   const LABELS = {
-    synced: '◈ SYNCED',
-    pending: '◈ PENDING',
-    offline: '◈ OFFLINE',
-    error: '◈ SYNC ERROR',
+    synced: '● Synced',
+    pending: '◌ Syncing',
+    offline: '● Offline · changes stay on this device',
+    error: '⚠ Sync error · changes stay on this device',
   };
   const CLASSES = {
     synced: 'sync-synced',

@@ -14,6 +14,8 @@
    module rather than inlined in the sync engine).
    ============================================================ */
 
+const { normalizeSchedule } = require('../renderer/domain.js');
+
 // undefined/null/0-that-means-"unset" all round-trip through here as
 // null: domain.js items use `undefined` for an unset archivedAt/deletedAt
 // (see migrate()), but `undefined` doesn't survive JSON.stringify inside
@@ -45,6 +47,7 @@ function itemToPushRow(item) {
     priority: item.priority,
     category: item.category || '',
     notes: item.notes || '',
+    ...normalizeSchedule(item),
     addedAt: msToIso(item.addedAt),
     updatedAt: msToIso(item.updatedAt),
     reviewedAt: msToIso(item.reviewedAt),
@@ -66,13 +69,18 @@ function logEntryToPushRow(itemId, entry) {
 // come back as `undefined` rather than `null` when unset, matching
 // domain.js's own convention (isStale/mergeItem etc. use `!item.archivedAt`).
 function rowToItem(row) {
-  return {
+  const item = {
     id: row.id,
     name: row.name,
     status: row.status,
     priority: row.priority,
     category: row.category || '',
     notes: row.notes || '',
+    reviewIntervalDays: row.review_interval_days,
+    nextReviewOn: row.next_review_on || '',
+    waitingOn: row.waiting_on || '',
+    checkpoint: row.checkpoint || '',
+    checkpointOn: row.checkpoint_on || '',
     addedAt: isoToMs(row.added_at),
     updatedAt: isoToMs(row.updated_at),
     reviewedAt: isoToMs(row.reviewed_at),
@@ -80,6 +88,7 @@ function rowToItem(row) {
     deletedAt: isoToMs(row.deleted_at) || undefined,
     log: [],
   };
+  return { ...item, ...normalizeSchedule(item) };
 }
 
 // A pulled `log_entries` row -> a domain.js log entry ({id, ts, text}).

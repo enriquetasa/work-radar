@@ -4,6 +4,7 @@ const { test } = require('node:test');
 const assert = require('node:assert/strict');
 
 const M = require('../sync/mapping.js');
+const D = require('../renderer/domain.js');
 
 test('msToIso/isoToMs round-trip a real timestamp', () => {
   const ms = Date.parse('2026-01-15T10:20:30.123Z');
@@ -152,6 +153,11 @@ test('a full item round-trips through push-row and pull-row shapes unchanged', (
     priority: 'high',
     category: 'oees',
     notes: 'note',
+    reviewIntervalDays: 7,
+    nextReviewOn: '2026-09-30',
+    waitingOn: 'Alex',
+    checkpoint: 'Budget decision',
+    checkpointOn: '2026-09-28',
     addedAt: now - 3000,
     updatedAt: now,
     reviewedAt: now - 1000,
@@ -168,6 +174,11 @@ test('a full item round-trips through push-row and pull-row shapes unchanged', (
     priority: pushRow.priority,
     category: pushRow.category,
     notes: pushRow.notes,
+    review_interval_days: pushRow.reviewIntervalDays,
+    next_review_on: pushRow.nextReviewOn,
+    waiting_on: pushRow.waitingOn,
+    checkpoint: pushRow.checkpoint,
+    checkpoint_on: pushRow.checkpointOn,
     added_at: pushRow.addedAt,
     updated_at: pushRow.updatedAt,
     reviewed_at: pushRow.reviewedAt,
@@ -176,4 +187,39 @@ test('a full item round-trips through push-row and pull-row shapes unchanged', (
   };
   const roundTripped = M.rowToItem(pulledRow);
   assert.deepEqual(roundTripped, { ...item, log: [] });
+});
+
+test('legacy server rows normalize exactly like migrated local items', () => {
+  const reviewedAt = new Date(2026, 8, 23, 23, 30).getTime();
+  const item = { id: 'legacy', reviewedAt, addedAt: reviewedAt, updatedAt: reviewedAt };
+  const pulled = M.rowToItem({
+    id: item.id,
+    reviewed_at: M.msToIso(reviewedAt),
+    added_at: M.msToIso(reviewedAt),
+    updated_at: M.msToIso(reviewedAt),
+  });
+  assert.deepEqual(D.normalizeSchedule(pulled), D.normalizeSchedule(item));
+  assert.equal(pulled.reviewIntervalDays, 14);
+  assert.equal(pulled.nextReviewOn, '2026-10-07');
+});
+
+test('manual cadence and cleared optional fields survive the wire boundary', () => {
+  const item = {
+    reviewIntervalDays: null,
+    nextReviewOn: '',
+    waitingOn: '',
+    checkpoint: '',
+    checkpointOn: '',
+  };
+  const pushed = M.itemToPushRow(item);
+  assert.equal(pushed.reviewIntervalDays, null);
+  assert.equal(pushed.nextReviewOn, '');
+  const pulled = M.rowToItem({
+    review_interval_days: null,
+    next_review_on: null,
+    waiting_on: null,
+    checkpoint: null,
+    checkpoint_on: null,
+  });
+  assert.deepEqual(D.normalizeSchedule(pulled), item);
 });

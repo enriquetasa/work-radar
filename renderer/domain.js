@@ -9,7 +9,7 @@
 
 (function (root) {
   const SCHEMA = 3;
-  const STALE_DAYS = 14; // days without a PING => NEEDS REVIEW
+  const STALE_DAYS = 14; // default review interval for existing projects
   const BACKUP_DAYS = 7; // nudge to export after this long
   const DAY = 86400000;
 
@@ -65,8 +65,74 @@
     return Math.floor((now - ts) / DAY);
   }
 
+  // Date-only schedules follow the user's calendar, including DST changes.
+  function localDate(now = Date.now()) {
+    const d = new Date(now);
+    if (!Number.isFinite(d.getTime()) || d.getFullYear() < 1 || d.getFullYear() > 9999) return '';
+    return `${String(d.getFullYear()).padStart(4, '0')}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  }
+
+  function validDate(value) {
+    if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return '';
+    const d = new Date(value + 'T12:00:00');
+    return localDate(d) === value ? value : '';
+  }
+
+  function reviewInterval(value) {
+    return value === null
+      ? null
+      : Number.isSafeInteger(value) && value > 0 && value <= 3650
+        ? value
+        : STALE_DAYS;
+  }
+
+  function dateAfter(now, days) {
+    const d = new Date(now);
+    d.setDate(d.getDate() + days);
+    return localDate(d);
+  }
+
+  function reviewDate(item) {
+    const explicit = validDate(item.nextReviewOn);
+    if (explicit) return explicit;
+    const interval = reviewInterval(item.reviewIntervalDays);
+    return interval === null ? '' : dateAfter(item.reviewedAt ?? item.addedAt ?? 0, interval);
+  }
+
+  function normalizeSchedule(item) {
+    return {
+      reviewIntervalDays: reviewInterval(item.reviewIntervalDays),
+      nextReviewOn: reviewDate(item),
+      waitingOn: typeof item.waitingOn === 'string' ? item.waitingOn.trim() : '',
+      checkpoint: typeof item.checkpoint === 'string' ? item.checkpoint.trim() : '',
+      checkpointOn: validDate(item.checkpointOn),
+    };
+  }
+
   function isStale(item, now = Date.now()) {
-    return !item.archivedAt && daysSince(item.reviewedAt, now) >= STALE_DAYS;
+    const date = reviewDate(item);
+    return !item.archivedAt && !item.deletedAt && !!date && date <= localDate(now);
+  }
+
+  function attentionReasons(item, now = Date.now()) {
+    if (item.archivedAt || item.deletedAt) return [];
+    const today = localDate(now);
+    const reasons = [];
+    const review = reviewDate(item);
+    if (review && review <= today) {
+      reasons.push(review === today ? 'Review due today' : `Review overdue · ${review}`);
+    }
+    const checkpoint = validDate(item.checkpointOn);
+    if (checkpoint && checkpoint <= today) {
+      reasons.push(
+        checkpoint === today ? 'Checkpoint today' : `Checkpoint overdue · ${checkpoint}`
+      );
+    }
+    return reasons;
+  }
+
+  function isDueToday(item, now = Date.now()) {
+    return attentionReasons(item, now).length > 0;
   }
 
   // Normalise an arbitrary list (legacy data, imports) into the current
@@ -139,7 +205,8 @@
           notes: x.notes || '',
           addedAt: x.addedAt || now,
           updatedAt,
-          reviewedAt: x.reviewedAt || x.addedAt || now,
+          reviewedAt: x.reviewedAt ?? x.addedAt ?? now,
+          ...normalizeSchedule({ ...x, reviewedAt: x.reviewedAt ?? x.addedAt ?? now }),
           archivedAt: x.archivedAt || undefined,
           deletedAt: x.deletedAt || undefined,
           log,
@@ -159,15 +226,22 @@
   // Filter + sort the current view. Pure: derives from state, never mutates it.
   function selectVisible(state, now = Date.now()) {
     const ui = state.ui;
-    let list = (ui.view === 'live' ? state.items : state.arch).filter((i) => !i.deletedAt);
-    const q = ui.search.trim().toLowerCase();
+    const archive = ui.view === 'archive';
+    const today = ui.view === 'today';
+    let list = (archive ? state.arch : state.items).filter((i) => !i.deletedAt);
+    if (today) list = list.filter((i) => isDueToday(i, now));
+    const q = today ? '' : (ui.search || '').trim().toLowerCase();
     if (q) {
       list = list.filter((i) =>
-        (i.name + ' ' + (i.category || '') + ' ' + (i.notes || '')).toLowerCase().includes(q)
+        [i.name, i.category, i.notes, i.waitingOn, i.checkpoint]
+          .filter(Boolean)
+          .join(' ')
+          .toLowerCase()
+          .includes(q)
       );
     }
-    if (ui.view === 'live') {
-      const f = ui.filter;
+    if (!archive && !today) {
+      const f = ui.filter || 'all';
       if (f === 'review') list = list.filter((i) => isStale(i, now));
       else if (f !== 'all') list = list.filter((i) => i.status === f);
     }
@@ -175,7 +249,11 @@
     list.sort((a, b) => {
       if (s === 'priority')
         return PRANK[a.priority] - PRANK[b.priority] || a.name.localeCompare(b.name);
-      if (s === 'stale') return a.reviewedAt - b.reviewedAt;
+      if (s === 'stale')
+        return (
+          (reviewDate(a) || '9999').localeCompare(reviewDate(b) || '9999') ||
+          a.name.localeCompare(b.name)
+        );
       if (s === 'name') return a.name.localeCompare(b.name);
       if (s === 'recent') return b.addedAt - a.addedAt;
       return 0;
@@ -216,11 +294,26 @@
             const notesHTML = item.notes
               ? `<div class="item-notes">${escapeHtml(item.notes)}</div>`
               : '';
+            const schedule = normalizeSchedule(item);
+            const context = [
+              schedule.nextReviewOn ? `Next review: ${schedule.nextReviewOn}` : '',
+              schedule.reviewIntervalDays === null
+                ? 'Review rhythm: manual'
+                : `Review rhythm: every ${schedule.reviewIntervalDays} days`,
+              schedule.waitingOn ? `Waiting on: ${schedule.waitingOn}` : '',
+              schedule.checkpoint || schedule.checkpointOn
+                ? `Checkpoint: ${schedule.checkpoint}${schedule.checkpointOn ? ` (${schedule.checkpointOn})` : ''}`
+                : '',
+            ];
+            const scheduleHTML = context
+              .filter(Boolean)
+              .map((text) => `<div class="item-meta">${escapeHtml(text)}</div>`)
+              .join('');
             const logHTML =
               item.log && item.log.length
                 ? `<div class="log">${item.log.map((e) => `<div class="log-entry"><span class="log-ts">${fdt(e.ts)}</span>${escapeHtml(e.text)}</div>`).join('')}</div>`
                 : '';
-            return `<div class="item"><div class="item-name">${escapeHtml(item.name.toUpperCase())}</div><div class="item-meta">${escapeHtml(meta)}</div>${notesHTML}${logHTML}</div>`;
+            return `<div class="item"><div class="item-name">${escapeHtml(item.name.toUpperCase())}</div><div class="item-meta">${escapeHtml(meta)}</div>${scheduleHTML}${notesHTML}${logHTML}</div>`;
           })
           .join('');
         return `<div class="group"><div class="group-label">${PRIORITY_LABEL[g.priority]}</div>${itemsHTML}</div>`;
@@ -378,8 +471,24 @@ ${groupsHTML}
     return Math.max(now, (prevUpdatedAt || 0) + 1);
   }
 
+  function reviewItem(item, now = Date.now(), nextReviewOn) {
+    const interval = reviewInterval(item.reviewIntervalDays);
+    return {
+      ...item,
+      reviewIntervalDays: interval,
+      reviewedAt: now,
+      nextReviewOn: validDate(nextReviewOn) || (interval === null ? '' : dateAfter(now, interval)),
+      updatedAt: nextUpdatedAt(item.updatedAt, now),
+    };
+  }
+
   function pingItem(item, now = Date.now()) {
-    return { ...item, reviewedAt: now, updatedAt: nextUpdatedAt(item.updatedAt, now) };
+    return reviewItem(item, now);
+  }
+
+  function snoozeItem(item, date, now = Date.now()) {
+    if (!validDate(date)) return item;
+    return { ...item, nextReviewOn: date, updatedAt: nextUpdatedAt(item.updatedAt, now) };
   }
 
   function archiveItem(item, now = Date.now()) {
@@ -388,7 +497,7 @@ ${groupsHTML}
 
   function restoreItem(item, now = Date.now()) {
     const { archivedAt, ...rest } = item;
-    return { ...rest, reviewedAt: now, updatedAt: nextUpdatedAt(item.updatedAt, now) };
+    return reviewItem(rest, now);
   }
 
   // PURGE never removes the record — see mergeItem's doc comment for why a
@@ -409,11 +518,28 @@ ${groupsHTML}
 
   // Keep item creation and clock-skew-safe updates out of the DOM layer.
   function createItem(v, now = Date.now(), idFn = uid) {
-    return { id: idFn(), ...v, log: [], addedAt: now, updatedAt: now, reviewedAt: now };
+    return {
+      id: idFn(),
+      ...v,
+      ...normalizeSchedule({ ...v, reviewedAt: now }),
+      log: [],
+      addedAt: now,
+      updatedAt: now,
+      reviewedAt: now,
+    };
   }
 
   function updateItem(item, patch, now = Date.now()) {
-    return { ...item, ...patch, updatedAt: nextUpdatedAt(item.updatedAt, now) };
+    const merged = { ...item, ...patch };
+    // A cadence-only edit recalculates its date. A supplied date wins.
+    if (Object.hasOwn(patch, 'reviewIntervalDays') && !Object.hasOwn(patch, 'nextReviewOn')) {
+      merged.nextReviewOn = '';
+    }
+    return {
+      ...merged,
+      ...normalizeSchedule(merged),
+      updatedAt: nextUpdatedAt(item.updatedAt, now),
+    };
   }
 
   // Merge instead of replacing so reload cannot erase a renderer edit whose
@@ -462,6 +588,13 @@ ${groupsHTML}
     uid,
     fdt,
     daysSince,
+    localDate,
+    reviewDate,
+    normalizeSchedule,
+    attentionReasons,
+    isDueToday,
+    reviewItem,
+    snoozeItem,
     isStale,
     migrate,
     serialize,

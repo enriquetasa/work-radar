@@ -340,7 +340,7 @@ function buildMenu() {
     {
       label: 'Radar',
       submenu: [
-        { label: 'New Contact', accelerator: 'CmdOrCtrl+N', click: send('new') },
+        { label: 'New Project', accelerator: 'CmdOrCtrl+N', click: send('new') },
         { label: 'Search', accelerator: 'CmdOrCtrl+F', click: send('search') },
         { type: 'separator' },
         { label: 'Export JSON Backup…', accelerator: 'CmdOrCtrl+E', click: send('export') },
