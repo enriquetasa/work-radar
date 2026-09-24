@@ -530,6 +530,90 @@ test('addLogEntry defaults to uid() for the entry id when no id function is give
   assert.ok(out.log[0].id, 'assigns an id');
 });
 
+/* ---------- Clock-skew-safe updatedAt (Phase 1 review carry-over) ----------
+   Machine clocks differ. If a mutation just stamped updatedAt = Date.now(),
+   an edit made on this machine right after pulling in a copy from another
+   machine whose clock runs ahead would get an updatedAt *older* than the
+   row already carries, so mergeItem's "newest updatedAt wins" would keep
+   silently discarding this machine's own edit forever. nextUpdatedAt (and
+   every mutation below) instead always lands at least one past whatever
+   updatedAt the row already has, never actually going backwards — while
+   other timestamp fields (reviewedAt, archivedAt, deletedAt, log ts) keep
+   recording the real wall-clock time unchanged. */
+
+test('nextUpdatedAt is the wall clock when it is already ahead of the previous updatedAt', () => {
+  assert.equal(D.nextUpdatedAt(100, 500), 500);
+  assert.equal(D.nextUpdatedAt(undefined, 500), 500);
+  assert.equal(D.nextUpdatedAt(0, 500), 500);
+});
+
+test('nextUpdatedAt bumps past a future-skewed previous updatedAt even when now is earlier', () => {
+  assert.equal(D.nextUpdatedAt(1000, 500), 1001);
+});
+
+test('pingItem bumps updatedAt past a skewed-ahead previous updatedAt, but reviewedAt is the real now', () => {
+  const item = { id: 'x', name: 'Co', updatedAt: 1000, reviewedAt: 100, log: [] };
+  const out = D.pingItem(item, 500);
+  assert.equal(out.updatedAt, 1001);
+  assert.equal(out.reviewedAt, 500);
+});
+
+test('archiveItem bumps updatedAt past a skewed-ahead previous updatedAt', () => {
+  const item = { id: 'x', name: 'Co', updatedAt: 1000, reviewedAt: 100, log: [] };
+  const out = D.archiveItem(item, 500);
+  assert.equal(out.updatedAt, 1001);
+  assert.equal(out.archivedAt, 500);
+});
+
+test('restoreItem bumps updatedAt past a skewed-ahead previous updatedAt', () => {
+  const item = { id: 'x', name: 'Co', archivedAt: 300, updatedAt: 1000, reviewedAt: 100, log: [] };
+  const out = D.restoreItem(item, 500);
+  assert.equal(out.updatedAt, 1001);
+  assert.equal(out.reviewedAt, 500);
+});
+
+test('purgeItem bumps updatedAt past a skewed-ahead previous updatedAt', () => {
+  const item = { id: 'x', name: 'Co', updatedAt: 1000, reviewedAt: 100, log: [] };
+  const out = D.purgeItem(item, 500);
+  assert.equal(out.updatedAt, 1001);
+  assert.equal(out.deletedAt, 500);
+});
+
+test('addLogEntry bumps updatedAt past a skewed-ahead previous updatedAt, but the entry ts is the real now', () => {
+  const item = { id: 'x', name: 'Co', updatedAt: 1000, reviewedAt: 100, log: [] };
+  const out = D.addLogEntry(item, 'hi', 500, () => 'fixed-id');
+  assert.equal(out.updatedAt, 1001);
+  assert.equal(out.log[0].ts, 500);
+});
+
+test('createItem stamps a brand-new item at now (no previous updatedAt to skew against)', () => {
+  const out = D.createItem(
+    { name: 'Co', status: 'active', priority: 'low' },
+    500,
+    () => 'fixed-id'
+  );
+  assert.equal(out.id, 'fixed-id');
+  assert.equal(out.addedAt, 500);
+  assert.equal(out.updatedAt, 500);
+  assert.equal(out.reviewedAt, 500);
+  assert.deepEqual(out.log, []);
+  assert.equal(out.name, 'Co');
+});
+
+test('updateItem applies the patch and bumps updatedAt past a skewed-ahead previous updatedAt', () => {
+  const item = { id: 'x', name: 'Co', notes: 'old', updatedAt: 1000, log: [] };
+  const out = D.updateItem(item, { notes: 'new' }, 500);
+  assert.equal(out.notes, 'new');
+  assert.equal(out.updatedAt, 1001);
+  assert.notEqual(out, item, 'returns a new object, does not mutate the input');
+});
+
+test('updateItem bumps updatedAt to now when the previous updatedAt is not ahead', () => {
+  const item = { id: 'x', name: 'Co', notes: 'old', updatedAt: 100, log: [] };
+  const out = D.updateItem(item, { notes: 'new' }, 500);
+  assert.equal(out.updatedAt, 500);
+});
+
 test('mergeState: item archived on one side and edited (newer) on the other ends up live', () => {
   const archivedSide = {
     items: [],
@@ -898,4 +982,137 @@ test('buildReportHTML escapes HTML special characters', () => {
   const items = D.migrate([{ name: 'A & B <test>', addedAt: NOW }], NOW);
   const html = D.buildReportHTML(items, NOW);
   assert.ok(html.includes('A &amp; B &lt;TEST&gt;'), 'special chars escaped and uppercased');
+});
+
+test('mergeDiskIntoStore: an in-flight renderer edit survives a reload', () => {
+  // A save queued before this reload (still in flight, or still sitting
+  // in the debounce window) hasn't reached disk yet — the reload must
+  // not roll the in-memory edit back to the stale copy on disk.
+  const onDisk = {
+    items: [
+      {
+        id: 'a',
+        name: 'Old name',
+        status: 'active',
+        priority: 'low',
+        category: '',
+        notes: '',
+        addedAt: 1,
+        updatedAt: 100,
+        reviewedAt: 1,
+        log: [],
+      },
+    ],
+    arch: [],
+    lastExport: 5,
+  };
+  const store = {
+    items: [
+      {
+        id: 'a',
+        name: 'Edited name',
+        status: 'active',
+        priority: 'low',
+        category: '',
+        notes: '',
+        addedAt: 1,
+        updatedAt: 200,
+        reviewedAt: 1,
+        log: [],
+      },
+    ],
+    arch: [],
+    lastExport: 5,
+  };
+  const merged = D.mergeDiskIntoStore(onDisk, store);
+  assert.equal(merged.items.length, 1);
+  assert.equal(merged.items[0].name, 'Edited name', 'the newer in-memory edit must win');
+  assert.equal(merged.items[0].updatedAt, 200);
+});
+
+test('mergeDiskIntoStore: a remote change merged to disk overwrites a stale in-memory copy', () => {
+  const onDisk = {
+    items: [
+      {
+        id: 'a',
+        name: 'From remote',
+        status: 'active',
+        priority: 'low',
+        category: '',
+        notes: '',
+        addedAt: 1,
+        updatedAt: 300,
+        reviewedAt: 1,
+        log: [],
+      },
+    ],
+    arch: [],
+    lastExport: 5,
+  };
+  const store = {
+    items: [
+      {
+        id: 'a',
+        name: 'Stale renderer copy',
+        status: 'active',
+        priority: 'low',
+        category: '',
+        notes: '',
+        addedAt: 1,
+        updatedAt: 100,
+        reviewedAt: 1,
+        log: [],
+      },
+    ],
+    arch: [],
+    lastExport: 5,
+  };
+  const merged = D.mergeDiskIntoStore(onDisk, store);
+  assert.equal(merged.items[0].name, 'From remote');
+  assert.equal(merged.items[0].updatedAt, 300);
+});
+
+test('mergeDiskIntoStore: migrates a still-schema-2 file on disk before merging', () => {
+  const onDisk = {
+    schema: 2,
+    items: [
+      {
+        id: 'a',
+        name: 'Legacy',
+        status: 'active',
+        priority: 'low',
+        addedAt: 1,
+        reviewedAt: 1,
+        log: [{ ts: 50, text: 'old note' }], // no id — schema v2
+      },
+    ],
+    arch: [],
+    lastExport: 0,
+  };
+  const merged = D.mergeDiskIntoStore(onDisk, { items: [], arch: [], lastExport: 0 });
+  assert.equal(merged.items[0].log.length, 1);
+  assert.ok(merged.items[0].log[0].id, 'the legacy log entry must get a stable id');
+});
+
+test('mergeDiskIntoStore: falls back to the store’s own lastExport when the disk payload omits it', () => {
+  const merged = D.mergeDiskIntoStore(
+    { items: [], arch: [] },
+    { items: [], arch: [], lastExport: 42 }
+  );
+  assert.equal(merged.lastExport, 42);
+});
+
+test('mergeDiskIntoStore: never rolls lastExport backwards — takes whichever side is newer', () => {
+  // A reload landing after an export set Store.lastExport in memory but
+  // before that save reached disk must not roll it back (and bring back
+  // the "back up your data" nudge) — found in review.
+  const merged = D.mergeDiskIntoStore(
+    { items: [], arch: [], lastExport: 5 },
+    { items: [], arch: [], lastExport: 42 }
+  );
+  assert.equal(
+    merged.lastExport,
+    42,
+    'the store’s newer lastExport must win over a stale disk value'
+  );
 });

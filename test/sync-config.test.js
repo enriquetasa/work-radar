@@ -2,6 +2,7 @@
 
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
+const path = require('node:path');
 
 const { resolveSyncConfig } = require('../sync/config.js');
 
@@ -44,7 +45,7 @@ test('falls back to sync-config.json in userData when no env vars are set', () =
     env: {},
     userDataDir: '/fake/userData',
     readFileSync: (file) => {
-      assert.equal(file, require('path').join('/fake/userData', 'sync-config.json'));
+      assert.equal(file, path.join('/fake/userData', 'sync-config.json'));
       return JSON.stringify({ url: 'http://127.0.0.1:54321', publishableKey: 'sb_publishable_y' });
     },
   });

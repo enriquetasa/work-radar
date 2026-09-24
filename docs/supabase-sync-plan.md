@@ -650,6 +650,599 @@ Phase 3 only gets a session; pushing/pulling rows is Phase 4.
   already signed out (harmless no-op, already called out above as
   deferred to a later pass). Both are still open, not forgotten.
 
+## Phase 4-5 notes (sync engine, first sync)
+
+Implemented in `sync/sync-engine.js`, plus small pure helper modules it
+depends on (`sync/mapping.js`, `sync/outbox.js`, `sync/sync-state.js`,
+`sync/keyset.js`, `sync/classify-error.js`, `sync/stale-remediation.js`,
+`sync/atomic-json-file.js`) and thin wiring in `main.js`/`preload.js`/
+`renderer/app.js`. Built in one pass rather than two separate phases —
+first sync (Phase 5) turned out to be almost entirely outbox bookkeeping
+(“mark everything pending”) inside the same engine, not a separate code
+path, so splitting it into its own commit would have meant re-opening
+`sync-engine.js` immediately after.
+
+- **Clock-skew-safe `updatedAt`, a gap carried over from the Phase 1
+  review.** Every mutation used to stamp `updatedAt = Date.now()`
+  directly. That is fine on one machine, but once rows travel between
+  machines whose clocks disagree, a machine whose clock reads _behind_
+  the clock that wrote a row's current `updatedAt` could never win a
+  future edit on that row — `Date.now()` on the slow machine keeps
+  coming back lower than the `updatedAt` already on the row, so
+  `mergeItem`'s "newest `updatedAt` wins" silently discards that
+  machine's own edits forever, no matter how many times it edits. Fixed
+  with `domain.js`'s `nextUpdatedAt(prevUpdatedAt, now)`
+  (`Math.max(now, (prevUpdatedAt || 0) + 1)`), used by every mutation
+  (`pingItem`, `archiveItem`, `restoreItem`, `purgeItem`, `addLogEntry`)
+  for the `updatedAt` field only — the other timestamp fields each sets
+  (`reviewedAt`, `archivedAt`, `deletedAt`, a log entry's `ts`) still
+  record the real wall-clock time unchanged, since only `updatedAt` is a
+  merge-decision field that must never go backwards. This surfaced two
+  mutations that had never gone through a pure `domain.js` function at
+  all: `Actions.add`/`Actions.update` in `renderer/app.js` were still
+  patching `Store.items` inline with a bare `Date.now()`, untested and
+  without the guard every other mutation already had. Both now go
+  through two new `domain.js` functions, `createItem`/`updateItem`,
+  built the same way as the existing mutations — unit-tested in
+  `test/domain.test.js` before the fix (TDD), `Actions.add`/
+  `Actions.update` reduced to thin wiring that calls them and commits.
+- **Everything that isn't Electron is a plain, dependency-injected
+  module**, same split as Phase 3's `sync/auth-*`. `sync/sync-engine.js`
+  takes the one supabase-js `client` main.js already built for auth (see
+  `buildSyncEngine()` in `main.js` — it shares auth's client rather than
+  creating a second one) plus four push/pull functions that default to
+  real implementations built from `client`, but can be overridden
+  directly. This is the main testability decision of the phase: faking
+  four plain async functions (`pushItemsRpc`, `pushLogEntriesRpc`,
+  `pullItemsPage`, `pullLogEntriesPage`) is far simpler and more
+  reliable than mocking the full `.from(...).select(...).gt(...).or(...)`
+  PostgREST builder chain, and `test/sync-engine.test.js` does exactly
+  that. `test/integration/sync-engine.test.js` then exercises the real
+  default implementations against local Supabase.
+- **The outbox is computed by main, never reported by the renderer.**
+  `sync/outbox.js`'s `snapshotOf(data)` reduces a data file to `{ items:
+{id: updatedAt}, logEntryIds: [...] }` — enough to answer "did this
+  change since the last time the engine looked?" — and
+  `diffSnapshot(prev, next)` is the actual diff: an item is pending if
+  its id is new or its `updatedAt` moved; a log entry is pending if its
+  id is new (log entries never change once written, so that's the only
+  way one can need pushing). `sync-engine.js`'s `recordLocalSave()` runs
+  this diff on every `data:save`, comparing the merged result against
+  the last snapshot persisted in `sync-state.json` — the renderer's
+  payload is just data, not a change list. **The same diff also runs
+  once at the start of every cycle** (`diffLocalChangesIntoOutbox()`,
+  called from `runCycle()` before anything else), not only from
+  `recordLocalSave()` — found in review: an edit that never went through
+  `recordLocalSave()` at all (a plain `atomicWrite` made while signed
+  out or before the session was restored — those are ordinary
+  `main.js`-level file writes, invisible to the engine) was silently
+  absorbed into the snapshot by the next pull's `snapshotOf(mergedPayload)`
+  and never pushed. Diffing at the start of every cycle instead of only
+  reacting to `data:save` closes that gap, and doubles as first sync
+  (see below) for free: an empty snapshot just makes everything "new".
+- **`sync-state.json`** (`sync/sync-state.js` for the shape,
+  `sync/atomic-json-file.js` for the atomic read/write — same temp-file-
+  then-rename pattern as the main data file and Phase 3's
+  `session-storage.js`) lives in `userData` next to the data file and
+  persists, per signed-in user id (not just "this machine" — a machine
+  could in principle sign out and into a different account):
+  `pendingItemIds`/`pendingLogEntryIds` (the outbox), `itemsCursor`/
+  `logEntriesCursor` (ms epoch, or `null` before the first pull),
+  `snapshot` (outbox.js's shape, for the next diff) and `firstSyncDone`.
+  Keying by user id, not machine, is what makes "first sync" correct if
+  the same machine is ever signed into a second account.
+- **One mapping module, two shapes, unit-tested with round-trip tests.**
+  `sync/mapping.js` is the only place ms-epoch numbers (domain.js's
+  internal representation) convert to/from `timestamptz`: `itemToPushRow`/
+  `logEntryToPushRow` produce the camelCase-with-ISO-strings shape
+  `push_items`/`push_log_entries` expect, `rowToItem`/`rowToLogEntry`
+  consume the snake_case-with-ISO-strings shape a plain `select('*')`
+  pull returns. `archivedAt`/`deletedAt` come back as `undefined` (not
+  `null`) when unset, matching domain.js's own convention.
+- **Push order is items then log entries, in batches** (`pushBatchSize`,
+  default 200), per the plan and because `push_log_entries` rejects a
+  row as `item_not_found` until its parent item has synced. A rejected
+  log entry just stays in the outbox — retried once the item itself
+  succeeds, no strict global ordering needed beyond "try items first
+  every cycle" (see the Phase 2 notes on why the RPC is built to allow
+  this rather than erroring).
+- **The known `stale_or_not_owned` tie-break gap is handled, not just
+  documented.** `sync/stale-remediation.js`'s `localWinsOverRemote`
+  answers "does the client's own `mergeItem`, given both versions,
+  actually still prefer the local one?" — using `mergeItem` itself
+  (injected, so this has no dependency on `renderer/`), not a
+  reimplementation of its tie-break chain. `decideStaleRemediation()`
+  wraps it with one more check, found in review: `mergeItem` trivially
+  prefers its first argument on a full tie (same `updatedAt`, identical
+  content), so `localWinsOverRemote` alone said "local wins" even for a
+  rejection that has nothing to do with the tie-break gap — an
+  already-accepted push being retried (e.g. after a mid-batch failure),
+  or two machines' first sync overlapping on identical data. Re-stamping
+  either of those pushes a content-free `updatedAt` bump that then
+  spreads to every machine, forever, and never converges. So
+  `decideStaleRemediation()` checks content equality (every field except
+  `log` and `updatedAt`) first and resolves (drops the id from the
+  outbox, no re-push) whenever it holds, _before_ asking
+  `localWinsOverRemote` at all — re-stamping only happens on the
+  genuinely rare case: an exact `updated_at` tie where the content
+  actually differs and the tie-break still prefers local.
+  `sync-engine.js`'s `remediateStaleItems()` re-reads the local item
+  from disk _inside_ the data-file mutex (see below) right before
+  deciding — not from the pre-push snapshot taken at the top of the
+  cycle, which can already be stale by the time remediation runs — and
+  calls `notifyReload()` after a re-stamp (missing before — found in
+  review: a re-stamp changes the file on disk, and the renderer's Store
+  is not the source of truth for it). Clearing a resolved id from the
+  outbox goes through the same "does the snapshot still match what was
+  compared" check as the push race fix below, so a concurrent newer
+  local edit can't be dropped out from under it either.
+- **Pull uses a lookback window and (synced_at, id) keyset pagination**,
+  per the `synced_at_trigger` migration's own comment on why a bare
+  `gt(cursor)` isn't safe: `sync/keyset.js`'s `pullAll` starts each pull
+  from `cursor - lookbackMs` (or the epoch, for a brand-new machine's
+  first pull ever) and pages using `keysetOrFilter`, the standard
+  two-clause PostgREST expansion of a compound-key `>` comparison
+  (`synced_at > X OR (synced_at = X AND id > Y)`) — needed because every
+  row in one push shares a single `synced_at`, so a page boundary can
+  fall inside a batch. Re-pulling the lookback window on every cycle is
+  safe because `mergeItem`/`unionLogs` are idempotent.
+- **The cursor (and the outbox snapshot) are persisted only after the
+  merge has actually been written to disk**, covered by a unit test
+  asserting write order. A crash in between just re-pulls the same
+  (idempotent) rows next cycle instead of losing them. The snapshot is
+  refreshed on every pull-driven write too, not just on `recordLocalSave`
+  — without this, an item nobody edits locally again (pulled once, never
+  touched) would have no snapshot entry and get flagged "changed" (by
+  the diff, which has never _seen_ its `updatedAt` before) on every
+  future local save forever — harmless (the resulting push is rejected
+  as `stale_or_not_owned`) but noisy.
+- **Items are pulled and merged in fully before log entries are even
+  requested**, mirroring the push order. This turns "a log entry's
+  parent item is already on disk by the time it's processed" from a
+  race into a guarantee: `log_entries.item_id` is a composite FK on
+  `items(id, user_id)`, so a log entry can only exist in the database
+  once its item does, and by pulling items first every cycle, any item
+  this account has ever synced is on disk before its log entries are
+  grouped and merged in. Log entries pulled for an item id somehow not
+  found locally (should be unreachable given the above) are logged as
+  an error and the log-entries cursor is _not_ advanced for that cycle,
+  rather than silently dropping them.
+- **The save race**: main merges an incoming `data:save` payload with
+  what's currently on disk (`recordLocalSave`, via the Phase 1 domain
+  merge) instead of overwriting it outright, per the option the plan's
+  Phase 4 line calls out. This is what stops a renderer save that was
+  queued before a background pull just merged in a remote change from
+  clobbering it — the merge is exactly the same "newest `updatedAt`
+  wins" rule that already reconciles two machines, applied here to
+  reconcile "the renderer's stale view" against "what main just wrote".
+  `main.js`'s `data:save` handler takes this path whenever the engine
+  exists at all (`syncEngine`, built once alongside auth), not only
+  while it's actually running (`syncEngineRunning`) — found in review:
+  gating on "running" left a narrow window right at sign-out where a
+  pull merge queued just before `stop()` could still land after a plain,
+  unserialized `atomicWrite`, silently dropping whichever wrote last.
+  `recordLocalSave` merges unconditionally and only its own outbox
+  bookkeeping needs a signed-in user (which it already skips gracefully
+  without one), so routing through it at all times keeps every write to
+  `data.json` behind the same mutex even right at that boundary; fully
+  local mode (no `syncEngine` at all) is unchanged. Covered by a unit
+  test that seeds a newer "already pulled" version on disk and asserts a
+  stale save can't undo it.
+- **Triggers**: startup (`start()`, once signed in — called from
+  `authService.onChange()` in `main.js`, never on its own), window focus
+  (`BrowserWindow`'s own `focus` event, wired in `createWindow()` so a
+  window recreated after all windows close on macOS still gets it), a
+  60-second interval (`setInterval` inside `start()`), and a debounced
+  trigger after `recordLocalSave` (default 3s, resets on every save so a
+  burst of edits pushes once, shortly after the burst ends). All four
+  funnel through the same `triggerNow()`, which coalesces overlapping
+  triggers into at most one cycle running at a time and re-runs once
+  more immediately after if another trigger fired mid-cycle, rather than
+  queuing an unbounded backlog. Every one of these four call sites is
+  fire-and-forget (`focus`, `setInterval`, `setTimeout` can't be
+  awaited), so each now does `triggerNow().catch(err => log.error(...))`
+  — found in review: anything thrown outside `runCycle()`'s own
+  try/catch used to become an unhandled rejection with no `cycleId`
+  context. The 60s interval also skips its own trigger entirely while
+  `backoffAttempts > 0` — otherwise the interval kept firing a fresh
+  cycle throughout an outage regardless of how long the backoff below
+  decided to wait, so the cap never actually took effect while the
+  interval was shorter than it (also found in review). The other three
+  triggers are deliberately not gated the same way — "something
+  happened, try now" is different from "is it time yet".
+- **`stop()` invalidates any cycle already in flight**, not just the
+  timers. `stop()` bumps a `generation` counter; `runCycle()` captures
+  it once at the start and checks it again after every `await`,
+  bailing out (no `setStatus`, no `scheduleRetry`, no rerun) the moment
+  it no longer matches. Found in review: without this, a cycle that was
+  already awaiting a push/pull when `stop()` ran (e.g. sign-out mid-
+  cycle) kept going, and its eventual `setStatus()` call made the
+  header's sync indicator reappear right after `main.js` had just
+  explicitly hidden it (`{ state: null }`) — breaking the "signed-out
+  shows no sync UI" rule — and a failing cycle's `scheduleRetry()` left
+  a timer armed that `stop()` had specifically just cleared. A plain
+  "is it running" boolean can't do this instead, because `triggerNow()`/
+  `runCycle()` are also called directly (by tests, and by
+  `recordLocalSave`'s own debounce) without `start()` ever having run,
+  and those calls must keep working normally — `generation` only
+  invalidates a specific in-flight cycle, never a fresh direct call.
+- **A stop() then start() while a cycle is in flight (sign-out then
+  sign-in, or an account switch) must still run a cycle for the new
+  session, not lose it.** Found in review: `triggerNow()`'s own
+  coalescing loop used to also require `generation` to still match
+  before re-running (`while (rerunRequested && generation ===
+myGeneration)`) — but the in-flight cycle's `myGeneration` had already
+  gone stale by the time `stop()` ran, so a `start()` landing on top of
+  it (which sees `cycleRunning` still true and only sets
+  `rerunRequested`) had that request silently swallowed: no cycle ran
+  for the new session until the next 60s interval or a window focus.
+  `triggerNow()` now loops on `rerunRequested` alone; `runCycle()`
+  itself captures the _current_ generation fresh every time it runs, so
+  a rerun after `stop()`+`start()` correctly runs for the new session,
+  and a rerun after a `stop()` with no `start()` simply finds no signed-
+  in user and no-ops. `stop()` also resets `rerunRequested`, so a
+  request left over from before it ran can't cause a spurious extra
+  attempt on its own. `recordLocalSave()` had the same class of gap one
+  level down: it had no `generation` guard at all, so a `stop()` landing
+  mid-save (between its merge and its outbox bookkeeping) still called
+  `setStatus('pending')` — reappearing right after `main.js`'s `{ state:
+null }` — and still armed a debounce timer `stop()` had just cleared.
+  It now captures `generation` at its own top and skips only the
+  status/debounce block on a mismatch; the merge and outbox bookkeeping
+  stay unconditional either way.
+- **`getUserId()` returns `{ userId, error }` rather than folding a
+  session-read failure into "no signed-in user".** Found in review:
+  auth-js's `getSession()` returns `{ session: null, error }` when the
+  access token has expired and its refresh hits a network error — a
+  real, retryable failure, not a clean sign-out — and the old code
+  mapped that straight to `null`, so `runCycle()` treated it as "nothing
+  to do": a debug log, no `setStatus`, no retry, leaving the header
+  showing the last good status (typically SYNCED) indefinitely while
+  local edits went unsynced. `runCycle()` now classifies a session error
+  the same as any other failed cycle (`setStatus(classifyError(...))`,
+  `scheduleRetry()`), and `recordLocalSave()` still reports `pending` on
+  this path (the merge above already ran, so there is a genuine local
+  edit to show), rather than silently keeping whatever status the last
+  successful cycle left behind.
+- **Retry with backoff, classified offline vs error.**
+  `sync/classify-error.js` is a best-effort heuristic (there's no
+  `navigator.onLine` in the main process, and supabase-js doesn't tag
+  its own errors as network-vs-other) over the shapes `fetch`/undici and
+  Postgres actually produce, erring towards OFFLINE on an ambiguous bare
+  `TypeError` since a network blip is far more likely in practice than a
+  genuinely new failure mode. A cycle that throws schedules a retry via
+  `triggerNow()` at `min(backoffMaxMs, backoffBaseMs * 2^attempts)`
+  (defaults 2s base, 5 min cap); any cycle that completes without
+  throwing resets the backoff, regardless of whether it ended `pending`
+  (row-level rejections, e.g. `item_not_found` waiting on its item) or
+  `synced`.
+- **Every read-modify-write of the main data file goes through one
+  mutex**, `withDataFile()` — a promise queue exactly like the one
+  `sync-state.json` already had, generalized to serialize `data.json`
+  too. Found in review: `recordLocalSave`, the two pull-and-merge
+  functions and stale-push remediation each used to read the file,
+  merge, and write it back with an `await` in between, unserialized —
+  so a cycle's pull merge and a concurrent `recordLocalSave` (or two
+  pulls) could interleave their read/write pairs and silently lose
+  whichever wrote last read the file before the other's write landed.
+  Every touch of `data.json` — reads included, via a `peekDataFile()`
+  built on the same primitive — now goes through this one queue, which
+  also collapsed the three copies of the "merge, build the payload,
+  write, refresh the snapshot" block into one shared code path.
+- **The main data file gets a strict reader; `sync-state.json` keeps
+  the tolerant one.** `readJsonFileStrict()` (`sync/atomic-json-file.js`)
+  still treats a missing file as the normal empty-first-run case, but
+  throws on a read/parse failure instead of degrading to "treat as
+  empty" — unlike `readJsonFile()`, which is fine doing that for the
+  rebuildable `sync-state.json`. Found in review: a corrupt/unparseable
+  `data.json` used to come back as `null` the same as a missing file,
+  and the very next pull or local save then wrote the merged (in
+  practice, remote-only or empty) result right over it — permanently
+  replacing the user's real data with no way back short of the daily
+  backup. A cycle hitting this now fails loudly (`status: 'error'`, a
+  logged `cycleId`) instead, and the corrupt file is left untouched.
+- **Status in the header**: `SYNCED` (nothing pending) `· PENDING`
+  (outbox non-empty, or the last save just queued something) `·
+OFFLINE · ERROR`, pushed over `sync:stateChanged` (`{ state }`, `state`
+  `null` meaning "hide it") and rendered by the pure
+  `renderer/sync-view.js`'s `computeSyncView` — same dual-mode
+  (browser global + CommonJS-under-node:test) pattern as `domain.js`/
+  `auth-view.js`, and the same reason: there's no DOM test harness here,
+  so the view/hide/colour-class decision is pulled out to be unit-
+  testable on its own. Colour-keyed to the palette `domain.js` already
+  uses for status/priority (green=SYNCED, amber=PENDING, grey=OFFLINE,
+  red=ERROR). Lives in `#auth-panel` next to the sign-in status, hidden
+  until main ever pushes a real state — which only happens once sync is
+  configured _and_ signed in, and main explicitly pushes `{ state: null
+}` on sign-out to hide it again, per the plan's "hidden when sync
+  isn't configured, and a signed-out state" requirement.
+- **Reload after a pull-driven merge** is a main → renderer push
+  (`sync:reload`, no payload) rather than main handing the renderer the
+  merged data directly. `Sync.reload()` in `app.js` **merges** the file's
+  contents into `Store` (`D.mergeState(fromDisk, Store)`) rather than
+  replacing it the way `Store.load()` does — found in review: a plain
+  replace can lose a renderer edit that hasn't reached disk yet, in two
+  ways — a save still in flight when `reload()` runs rolls `Store` back
+  to the pre-edit copy (and the next `Actions.update` would then spread
+  those stale fields with a fresh `updatedAt`, winning the next merge
+  and undoing the edit for good), and a save still sitting in
+  `scheduleSave`'s 120ms debounce window later serializes the _reloaded_
+  (pre-edit) `Store`, overwriting the edit on disk outright. The merge is
+  safe for the same reason the rest of this phase is: it's the same
+  last-writer-wins rule that already reconciles two machines, just
+  applied here to reconcile "the renderer's in-memory view" against
+  "what main just wrote to disk" — the identical class of save race
+  `recordLocalSave` already fixes on main's side of the file.
+- **The renderer can ask for the current sync status, not just wait for
+  a push.** `sync:status` (`main.js`) returns `syncEngineRunning ?
+syncEngine.getStatus() : null`, called once by `Sync.init()` the same
+  way `Auth.init()` calls `authStatus()`. Found in review: without this,
+  the indicator could get stuck hidden for an entire session — the
+  engine can `start()` (from `authService.onChange()`) before
+  `createWindow()` has even run, so its first `setStatus('synced')` push
+  can go out before any window (and so any listener) exists, and
+  `setStatus` dedupes identical values, so every later `'synced'` push
+  in the same session is then silently suppressed too. The same gap hit
+  a window recreated after all windows close on macOS, and a plain
+  renderer reload.
+- **First sync (Phase 5) is outbox bookkeeping, not a data-copying
+  step — and it is no longer a separate code path from the per-cycle
+  outbox diff above.** The diff that runs at the start of every cycle
+  (`diffLocalChangesIntoOutbox()`) is exactly what first sync needs: an
+  empty snapshot (a user who has never synced before) makes every
+  existing item/log entry id come back "new", so it's marked pending the
+  same way any other undiffed change would be. `firstSyncDone` is kept
+  only as an observability flag (logged once, on the first cycle for a
+  user) — nothing downstream branches on it. This folding-together
+  happened as part of the blocking-issue-3 fix below, not as a separate
+  refactor: the original `bootstrapFirstSyncIfNeeded()` only ran once
+  per user (gated on `firstSyncDone`), which is exactly what let a local
+  edit made outside `recordLocalSave()` — a plain `atomicWrite` while
+  signed out, or before the session was restored — get silently
+  absorbed into the snapshot by a later pull and never pushed, since
+  nothing ever diffed the file against the snapshot again once first
+  sync had already run. Running the same diff on every cycle fixes both
+  at once. The persist-before-push ordering is unchanged: the snapshot/
+  outbox update is written _before_ the push that follows in the same
+  cycle, so a crash mid-cycle retries the whole diff next time rather
+  than silently skipping it (re-marking already-pushed ids pending is a
+  harmless no-op; the RPCs are idempotent). Nothing here touches local
+  data or bypasses the ordinary push-then-pull-then-merge that follows
+  in the same cycle, which is what makes "never replace local data with
+  remote data" fall out of the design rather than needing a special
+  case: the first cycle pushes this machine's own data before it ever
+  pulls anything, and every pull from then on (first or not) goes
+  through the same union-based `mergeState`. Covered by an integration
+  test with two machines that each have data before ever syncing,
+  including an overlapping id where the genuinely newer copy must win on
+  both sides afterward, and by a unit test asserting a plain write made
+  outside `recordLocalSave()` is still diffed in and pushed on the next
+  cycle.
+- **Pushing an item no longer clears it from the outbox on a stale
+  snapshot.** `pushPendingItems()` remembers the `updatedAt` it actually
+  pushed for each id; the `withUserState` call that follows only clears
+  an id when the outbox's current snapshot entry for it still equals
+  that value. Found in review: `recordLocalSave` can write a newer
+  version of the very item a push is awaiting the RPC for — its own
+  snapshot update runs concurrently (a separate promise queue) and
+  leaves the id in the outbox with the _new_ snapshot value. Without
+  this check, the push's own completion then cleared the id anyway
+  (since it neither knows nor asks whether anything changed while it was
+  in flight), permanently dropping the newer edit: the file and the
+  snapshot already reflect it, so nothing would ever flag it as changed
+  again. Covered by a unit test that gates a fake push RPC, calls
+  `recordLocalSave()` with a newer version while it's in flight, and
+  asserts the id stays pending and the newer version is what gets pushed
+  on the next cycle.
+- **Structured logs**: every cycle logs one `sync cycle complete` (or
+  `sync cycle failed`) line with a `cycleId` (`crypto.randomUUID()`,
+  correlating every line one cycle produces — same pattern as Phase 3's
+  `attemptId`), duration, per-table push/pull counts, and the resulting
+  status; individual row rejections and the stale-push remediation path
+  log with the same `cycleId` for context.
+- **Integration tests** (`test/integration/sync-engine.test.js`) run two
+  real `sync/sync-engine.js` instances — independent tmp `userData`
+  dirs, independent supabase-js sessions, same underlying account — as
+  "two machines" against local Supabase, using the engine's real default
+  push/pull implementations (not fakes): offline edits made
+  independently on both converge to identical state after syncing; a
+  purge tombstone made on one propagates to the other as a tombstone,
+  never a hard delete; log entries added concurrently on both machines
+  (each racing ahead of the other pulling) both survive on both sides
+  once fully synced; and first sync from two machines with overlapping
+  data (including a shared id where one side's edit is genuinely newer)
+  converges without either side's push replacing the other's newer data.
+  `test/sync-engine.test.js` covers the engine's own logic (push/pull
+  ordering, the save race, cursor-after-merge persistence, first-sync
+  bootstrap, status/backoff transitions) with fakes, including a class
+  of test-hygiene bug found while writing it: any test leaving a
+  `recordLocalSave`-scheduled debounce timer or a failed cycle's retry
+  timer running past the end of the test hangs the whole file (the
+  timer eventually fires against a now-torn-down fixture, sometimes
+  cascading into an unbounded offline-retry loop) — every test that
+  creates an engine now stops it in a `finally` block.
+- **`recordLocalSave()` always merges with disk, even without a
+  signed-in user.** Found in review: it used to fall back to a plain
+  overwrite when `getUserId()` came back empty (e.g. a transient
+  `getSession()` failure), silently reintroducing the exact save race
+  this function exists to prevent. The merge itself never depended on
+  having a `userId` — only the outbox bookkeeping after it does — so
+  the merge now always runs, and only the bookkeeping is skipped (with
+  a warning log) when there's no signed-in user.
+- **`renderer/index.html`'s auth label reads "SIGNED IN AS"**, not
+  "SYNCED AS" — found in review: with a separate sync status now in the
+  header too, the old label's own use of "SYNCED" read as a second,
+  conflicting sync indicator right next to the real one.
+- **Deliberately left as-is, from this review**: a `stale_or_not_owned`
+  rejection for a reason other than a tie (e.g. a check-constraint
+  violation), or where `getItemById` reports the row isn't owned by this
+  user at all, still retries forever with a warn log every cycle rather
+  than moving to a terminal/rejected list — fixing it well needs a new
+  `sync-state.json` field (a `rejectedItemIds` list) and touches the
+  state shape's tests too, so it's scoped out of this pass rather than
+  folded in as a drive-by change.
+
+## Round 3 review fixes (two more data-loss races)
+
+A second review of the Phase 4-5 work found two further races, both in
+`sync/sync-engine.js`, that could silently drop a real edit rather than
+just re-push something harmlessly:
+
+- **A pull's snapshot update could drop a concurrent local edit from the
+  outbox for good.** `recordLocalSave` writes its merge to disk, then
+  awaits `getUserId()` (a `client.auth.getSession()` call, which can do
+  real network/disk IO) before diffing the merge into the outbox. If a
+  pull merge that changes something ran in that gap, its own
+  `withUserState` call used to replace the whole snapshot with
+  `snapshotOf(mergedPayload)` — a view of the file that, having been read
+  _after_ the local save's write, already included that save's edit. By
+  the time `recordLocalSave` got to its own diff, the snapshot already
+  "agreed" with the edit, so it was never queued, and no later cycle-start
+  diff could recover it either (snapshot and file agreed there too).
+  Fixed with `outbox.patchSnapshot(prevSnapshot, data, itemIds,
+logEntryIds)`: given a snapshot and the specific ids a merge just
+  wrote, it returns a new snapshot with _only_ those ids updated (or
+  added) — every other id already in the snapshot is carried over
+  completely untouched, so a concurrent write to some other id can never
+  be "caught up" by a snapshot update that never actually looked at it.
+  Both pull-and-merge functions now patch in just the ids their own pull
+  brought in (item ids for `pullItemsAndMerge`, log-entry ids for
+  `pullLogEntriesAndMerge`), and `recordLocalSave` patches in just its own
+  diff's ids, instead of each replacing the snapshot wholesale. Covered by
+  a unit test that gates `getSession()` mid-`recordLocalSave` while an
+  unrelated pull merge completes, and asserts the local edit is still
+  queued and still gets pushed on a later cycle.
+- **A log entry pulled ahead of its item's newer copy could get merged
+  into the stale local copy, and then survive there.** Items and log
+  entries are pulled in two separate round trips. If another machine
+  pushes an item edit and a log entry for it _between_ this machine's
+  items pull and its log-entries pull, the log entry arrives before the
+  item update that produced it — landing on this machine's _stale_ local
+  copy of that item, not the newer one. `pullLogEntriesAndMerge`'s "orphan"
+  handling only covered a log entry whose item is missing locally
+  entirely (documented, before this fix, as "should be unreachable" — it
+  is reachable, in exactly this window, corrected below); it did nothing
+  for an item that already exists locally but hasn't caught up yet.
+  Merging the entry into the stale copy, then reading the file back,
+  let `domain.migrate()`'s legacy `updatedAt` catch-up (folding the
+  newest log entry's `ts` into `updatedAt`, documented as a no-op on v3
+  data — true only because every v3 _mutation_ keeps that invariant,
+  which a sync-driven merge doesn't) bump the stale item's `updatedAt` up
+  to tie with the real update still in flight. `mergeItem`'s tie-break
+  can then still prefer the stale content on that exact tie, discarding
+  the other machine's edit — and stale-push remediation would then
+  re-stamp and re-push the stale copy over it. Fixed by extending the
+  "not ready for these entries yet" check: an item whose local
+  `updatedAt` is less than the greatest `ts` among its pulled entries is
+  now treated the same as a genuinely missing item — its entries are
+  skipped this cycle and the log-entries cursor is not advanced, so the
+  next cycle (once the items pull has caught up) retries and merges them
+  in correctly. Also corrected the orphan-branch log level from `error`
+  to `warn` and its comment, since both cases are the same ordinary
+  items/log-entries pull race, not a sign of corruption. Covered by a
+  unit test asserting a renamed item's new name survives once its item
+  pull catches up, and that the log entry from the skipped cycle is still
+  merged in afterwards rather than lost.
+
+Also fixed as part of this pass, cheap and clearly right: `recordLocalSave`'s
+"no signed-in user" log moved from `warn` to `debug` (a normal, frequent
+state while sync is configured but signed out, not something to warn
+about on every save); its session-read-error branch now applies the same
+"never downgrade offline/error to pending" guard the normal path already
+had; and `renderer/domain.js`'s `mergeDiskIntoStore` now takes
+`Math.max(fromDisk.lastExport, store.lastExport)` instead of preferring
+disk whenever it has a value, so a reload landing between an export
+setting `Store.lastExport` and that save reaching disk can't roll it
+back and resurface the backup nudge.
+
+**Left as-is from this round**: `migrate()`'s `updatedAt` catch-up still
+runs on every read regardless of the file's schema version, rather than
+being scoped to schema < 3 as the alternative, broader fix the review
+also offered — the per-item staleness check above closes the actual race
+it was found through without touching every migrate() call site
+(`withDataFile`, `Store.load`, `mergeDiskIntoStore`, `mergeImported`), so
+that larger change is left for a follow-up if another interaction
+surfaces. `migrate()` assigning a random `uid()` to an id-less item
+(hand-edited/corrupt data only — the app has always assigned ids) and the
+account-switch data-exposure caveat (already documented above, under
+"Open items") are both unchanged, for the same "not cheap, not clearly
+this pass's problem" reason the previous round gave for the items it
+deferred. The flaky-under-load interval test the review flagged already
+runs with wide margins and a `backoffBaseMs` large enough to keep a real
+retry from firing mid-test; it wasn't observed to flake in this pass, so
+injecting a fake timer for it was left alone rather than done
+speculatively.
+
+## Round 4 review fixes
+
+A second, independent review of the Phase 4-5 work. Two of its blocking
+findings turned out to already be fixed by the round 3 work above (the
+review's own reproduction steps match tests already in
+`test/sync-engine.test.js`); the rest were genuine gaps, fixed here.
+
+- **Already fixed (round 3), re-verified against the review's own
+  reproduction**: "a local save during a pull can lose the edit" is
+  exactly the race round 3 above describes and `outbox.patchSnapshot`
+  fixes — both pull-and-merge functions and `recordLocalSave` already
+  patch in only the ids they themselves changed rather than replacing the
+  whole snapshot. In fact the code had moved one step past what round 3's
+  own text describes: the pull functions patch in `changedItemIds`/
+  `changedLogEntryIds` (the ids a merge's own before/after diff found
+  actually different), not every id the pull's rows happened to carry —
+  the routine case of a lookback-window echo of this machine's own
+  already-merged row (found in review, one level past round 3's fix,
+  covered by `test/sync-engine.test.js`'s "echo of the edited id itself"
+  variant) reaches the snapshot-patch branch without changing anything on
+  disk, and patching its (unchanged) value in anyway would have wrongly
+  told a concurrent `recordLocalSave`'s diff "this id is already seen".
+  `recordLocalSave` itself also already computes its own diff from disk
+  immediately before vs after its own merge (inside the `withDataFile`
+  mutator), not against the outbox snapshot after the fact — so it can
+  never blame itself for a change a concurrent pull made, or vice versa,
+  regardless of how `getUserId()`'s timing interleaves with a pull's own
+  snapshot patch. No code change was needed for either finding; this note
+  exists because the prose above (written for round 3) undersold what the
+  code actually does by the time round 4 found nothing new to fix here.
+  Likewise, "check the other test files for the same problem" (inline
+  `require`s inside test bodies) found nothing under `sync/` this phase
+  added — the one hit was a single pre-existing line in
+  `test/sync-config.test.js` (Phase 3), moved to a top-level `require`
+  while here since it's a one-line, no-risk fix directly inside the rule
+  this review is enforcing.
+- **`decideStaleRemediation`'s "no reconcilable remote row" path now
+  warns.** `remediateStaleItems` used to `continue` silently when
+  `getItemById` found nothing (not owned by this user, or genuinely
+  gone) — contradicting this doc's own "Deliberately left as-is" bullet
+  above, which already claimed this retries "with a warn log every
+  cycle". Fixed to match the doc rather than the other way around: a
+  `stale_or_not_owned` id with no reconcilable remote row now logs a
+  `warn` with `cycleId`/`id` on every cycle it recurs, same as the
+  sibling "rejected for some other reason" branch already did. Test
+  first, in `test/sync-engine.test.js`.
+- **`recordLocalSave`'s outbox bookkeeping can no longer fail the save
+  itself.** Everything from `getUserId()` onward — the session read,
+  `sync-state.json`'s write, arming the debounce — used to run unguarded
+  after the data-file merge-and-write. A failure anywhere in that
+  bookkeeping (a disk-full `sync-state.json` write; `getUserId()`
+  throwing outright rather than returning an `error` field) propagated
+  out of `recordLocalSave`, and `main.js`'s `data:save` handler then
+  returned `{ ok: false }` even though the actual edit was already safely
+  on disk — misleading the renderer into thinking the save had failed
+  when only the bookkeeping had. Fixed by wrapping that whole block in a
+  `try/catch`: a bookkeeping failure is logged (`recordLocalSave: outbox
+bookkeeping failed after the data write succeeded`, with the error) and
+  otherwise swallowed, and `recordLocalSave` still returns the merged
+  payload either way. This is safe because the outbox isn't the only path
+  that can notice a change: the next cycle's own start-of-cycle diff
+  (`diffLocalChangesIntoOutbox`) re-diffs the file against whatever
+  snapshot is actually on disk regardless of whether this particular save
+  managed to record itself there. Test first.
+
+**Left as-is from this round**: the same items round 3 already deferred
+(the broader `migrate()` scoping change, the id-less-item/`uid()` case,
+the account-switch data-exposure caveat, and the flaky-under-load
+interval test) remain unchanged, for the same reasons already given.
+
 ## Open items
 
 - Work data (people and projects at Octopus) would live in a personal Supabase
@@ -658,3 +1251,11 @@ Phase 3 only gets a session; pushing/pulling rows is Phase 4.
   Supabase with fake data in the meantime.
 - Free projects pause after about a week of inactivity. With local-first this
   only delays sync until the project is resumed.
+- The data file is shared, but `sync-state.json` is keyed per signed-in user
+  id (see the Phase 4-5 notes). Signing out of one account and into a
+  different one on the same machine, with the first account's data still on
+  disk, marks every one of that data as pending and pushes it into the
+  second account — nothing currently warns about or refuses this. A future
+  pass should at least warn, or refuse first sync, when the local file
+  already holds data synced under a different `userId` than the one signing
+  in.

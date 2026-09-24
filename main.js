@@ -11,8 +11,10 @@ const { createAuthClient } = require('./sync/auth-client');
 const { createAuthService } = require('./sync/auth-service');
 const { waitForCallback, REDIRECT_TO } = require('./sync/callback-server');
 const { isValidEmail } = require('./sync/validate');
+const { createSyncEngine } = require('./sync/sync-engine');
 
 const DATA_FILE = () => path.join(app.getPath('userData'), 'work-radar-data.json');
+const SYNC_STATE_FILE = () => path.join(app.getPath('userData'), 'sync-state.json');
 const BACKUP_DIR = () => path.join(app.getPath('userData'), 'backups');
 const WINSTATE = () => path.join(app.getPath('userData'), 'window-state.json');
 const ICON_PNG = path.join(__dirname, 'build', 'icon.png');
@@ -25,6 +27,18 @@ let win = null;
 // authService as "sync disabled", which is exactly how the app behaved
 // before Phase 3 (see docs/supabase-sync-plan.md).
 let authService = null;
+// The sync engine (Phases 4-5 — push/pull/merge, see sync/sync-engine.js).
+// Built once alongside authService, sharing its supabase-js client, but
+// only ever start()ed while a session is actually signed in — see
+// authService.onChange() below. data:save (below) routes through the
+// engine's save-race-safe recordLocalSave whenever `syncEngine` exists at
+// all, not only while `syncEngineRunning` — the merge needs no signed-in
+// user, only recordLocalSave's own outbox bookkeeping does, and that
+// already degrades gracefully without one. `syncEngineRunning` is used
+// only to gate calls that really do need the engine to be actively
+// cycling (triggerNow() on focus, sync:status).
+let syncEngine = null;
+let syncEngineRunning = false;
 
 /* ---------- JSON helpers ---------- */
 async function readJSON(file) {
@@ -99,7 +113,28 @@ ipcMain.handle('data:save', async (_e, data) => {
     return { ok: false, error: 'invalid payload' };
   }
   try {
-    await atomicWrite(DATA_FILE(), data);
+    if (syncEngine) {
+      // recordLocalSave merges this payload with what's currently on
+      // disk instead of overwriting it outright — see
+      // docs/supabase-sync-plan.md's Phase 4-5 notes ("the save race") for
+      // why: a save the renderer queued just before a background pull
+      // wrote in a remote change must not stomp on that change. It also
+      // does this phase's outbox diffing (never trusts the renderer to
+      // report what changed) and schedules a debounced push.
+      //
+      // Gated on `syncEngine` existing at all, not `syncEngineRunning`
+      // (found in review): the merge itself needs no signed-in user —
+      // only recordLocalSave's own outbox bookkeeping does, and that
+      // already skips gracefully when there isn't one — so routing
+      // through it whenever the engine exists keeps every write to this
+      // file behind the same mutex even right at sign-out, when a pull
+      // merge started just before stop() ran can still be finishing its
+      // own write. Falling back to a bare atomicWrite in that narrow
+      // window would let it race a plain save and silently drop one.
+      await syncEngine.recordLocalSave(data);
+    } else {
+      await atomicWrite(DATA_FILE(), data);
+    }
     return { ok: true };
   } catch (err) {
     log.error('failed to save data file', { file: DATA_FILE(), err });
@@ -177,11 +212,13 @@ ipcMain.handle('data:revealBackups', async () => {
 /* ---------- Sync/auth (see docs/supabase-sync-plan.md → "Sign-in flow") ---------- */
 const SESSION_FILE = () => path.join(app.getPath('userData'), 'sync-session.enc');
 
-// Builds the auth service, or returns null if sync isn't usable — either
-// because it's not configured at all (no env vars / sync-config.json), or
-// because this OS has no secret store for Electron's safeStorage to use.
-// Never throws: any failure here just means the app runs fully local, as
-// it always did.
+// Builds the auth service (and returns the supabase-js client it uses,
+// so the sync engine below can share the same authenticated client
+// rather than creating a second one), or returns null if sync isn't
+// usable — either because it's not configured at all (no env vars /
+// sync-config.json), or because this OS has no secret store for
+// Electron's safeStorage to use. Never throws: any failure here just
+// means the app runs fully local, as it always did.
 function buildAuthService() {
   const syncConfig = resolveSyncConfig({ userDataDir: app.getPath('userData') });
   if (!syncConfig.configured) {
@@ -223,12 +260,42 @@ function buildAuthService() {
     });
     const service = createAuthService({ client, waitForCallback, redirectTo: REDIRECT_TO });
     log.info('sync configured', { source: syncConfig.source });
-    return service;
+    return { service, client };
   } catch (err) {
     log.error('failed to build auth service — auth disabled', { err });
     return null;
   }
 }
+
+// Builds the sync engine (Phases 4-5), sharing the auth service's own
+// supabase-js client. Never started here — only main.js's authService
+// .onChange handler below start()s/stop()s it, so pushes/pulls only run
+// while signed in (see docs/supabase-sync-plan.md's "Local-first" note).
+function buildSyncEngine(client) {
+  return createSyncEngine({
+    client,
+    dataFilePath: DATA_FILE(),
+    syncStateFilePath: SYNC_STATE_FILE(),
+    onStatus: (status) => {
+      if (win) win.webContents.send('sync:stateChanged', { state: status });
+    },
+    onReload: () => {
+      if (win) win.webContents.send('sync:reload');
+    },
+  });
+}
+
+ipcMain.handle('sync:status', async () => {
+  // The only way the renderer can learn the current sync status other
+  // than waiting for the next 'sync:stateChanged' push — needed because
+  // that push can otherwise go nowhere: main.js starts the engine (from
+  // authService.onChange, which can fire before createWindow()/`win` is
+  // set) before the renderer has registered its listener, and setStatus
+  // dedupes identical statuses, so a "synced" pushed once before anyone
+  // was listening then never gets pushed again. Sync.init() calls this
+  // once on load/reload, the same way Auth.init() calls authStatus().
+  return syncEngineRunning ? syncEngine.getStatus() : null;
+});
 
 ipcMain.handle('auth:status', async () => {
   if (!authService) return { configured: false };
@@ -368,6 +435,18 @@ async function createWindow() {
   win.on('closed', () => {
     win = null;
   });
+  // Window focus is one of the sync engine's triggers (see
+  // docs/supabase-sync-plan.md's Phase 4-5 notes) — a no-op while sync
+  // isn't running, so this is safe to wire unconditionally.
+  win.on('focus', () => {
+    // triggerNow() is fire-and-forget here (the focus handler can't await
+    // it) — without a .catch, anything that throws outside runCycle's own
+    // try/catch (e.g. getUserId()/now() themselves) becomes an unhandled
+    // rejection with no cycleId context (found in review).
+    if (syncEngineRunning) {
+      syncEngine.triggerNow().catch((err) => log.error('sync focus trigger failed', { err }));
+    }
+  });
   log.info('window created', { width: state.width, height: state.height });
 }
 
@@ -380,10 +459,25 @@ app.whenReady().then(async () => {
   }
 
   await dailyBackup();
-  authService = buildAuthService();
-  if (authService) {
+  const built = buildAuthService();
+  if (built) {
+    authService = built.service;
+    syncEngine = buildSyncEngine(built.client);
     authService.onChange((status) => {
       if (win) win.webContents.send('auth:stateChanged', status);
+      // Sync only ever runs while signed in (see docs/supabase-sync-plan.md's
+      // "Local-first" note) — start()/stop() are both idempotent, so this
+      // fires safely on every auth state change, not just the transitions.
+      if (status.signedIn) {
+        syncEngineRunning = true;
+        syncEngine.start();
+      } else if (syncEngineRunning) {
+        syncEngineRunning = false;
+        syncEngine.stop();
+        // Hide the status indicator on sign-out — a signed-out state
+        // shows no sync UI at all, per the plan.
+        if (win) win.webContents.send('sync:stateChanged', { state: null });
+      }
     });
   }
   buildMenu();

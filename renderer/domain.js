@@ -349,37 +349,106 @@ ${groupsHTML}
     };
   }
 
-  // Item mutations. Every one bumps updatedAt to `now` so mergeItem's
-  // "newest updatedAt wins" rule actually sees every change — a mutation
-  // that forgot this bump would let a stale copy on another machine
-  // silently overwrite it, or (for purge) let the item come back from the
-  // dead. Pure: each returns a new item, never mutates the one passed in.
+  // Item mutations. Every one bumps updatedAt so mergeItem's "newest
+  // updatedAt wins" rule actually sees every change — a mutation that
+  // forgot this bump would let a stale copy on another machine silently
+  // overwrite it, or (for purge) let the item come back from the dead.
+  // Pure: each returns a new item, never mutates the one passed in.
   // app.js's Actions call these instead of building the patch inline, so
   // the bump is tested here rather than only reachable through the DOM.
 
+  // Machine clocks differ. A mutation that just stamped updatedAt =
+  // Date.now() could hand back an updatedAt *older* than the row already
+  // carries, if this machine's clock reads behind the clock that wrote
+  // that row (or simply behind this same row's own last edit, replayed
+  // from a pull) — and mergeItem's "newest updatedAt wins" would then
+  // keep discarding this machine's own edit forever, since it can never
+  // catch up under a plain Date.now(). nextUpdatedAt instead always lands
+  // at least one past whatever updatedAt the row already has, using the
+  // wall clock only when that's already ahead. Other timestamp fields
+  // (reviewedAt, archivedAt, deletedAt, log ts) are unaffected — they
+  // keep recording the real wall-clock time, only updatedAt is a
+  // merge-decision field that must never go backwards.
+  function nextUpdatedAt(prevUpdatedAt, now = Date.now()) {
+    return Math.max(now, (prevUpdatedAt || 0) + 1);
+  }
+
   function pingItem(item, now = Date.now()) {
-    return { ...item, reviewedAt: now, updatedAt: now };
+    return { ...item, reviewedAt: now, updatedAt: nextUpdatedAt(item.updatedAt, now) };
   }
 
   function archiveItem(item, now = Date.now()) {
-    return { ...item, archivedAt: now, updatedAt: now };
+    return { ...item, archivedAt: now, updatedAt: nextUpdatedAt(item.updatedAt, now) };
   }
 
   function restoreItem(item, now = Date.now()) {
     const { archivedAt, ...rest } = item;
-    return { ...rest, reviewedAt: now, updatedAt: now };
+    return { ...rest, reviewedAt: now, updatedAt: nextUpdatedAt(item.updatedAt, now) };
   }
 
   // PURGE never removes the record — see mergeItem's doc comment for why a
   // tombstone (deletedAt) has to be an ordinary "newest updatedAt wins"
   // mutation, not a special case, so it merges the same way as any edit.
   function purgeItem(item, now = Date.now()) {
-    return { ...item, deletedAt: now, updatedAt: now };
+    return { ...item, deletedAt: now, updatedAt: nextUpdatedAt(item.updatedAt, now) };
   }
 
   function addLogEntry(item, text, now = Date.now(), idFn = uid) {
     const entry = { id: idFn(), ts: now, text };
-    return { ...item, log: [...(item.log || []), entry], updatedAt: now };
+    return {
+      ...item,
+      log: [...(item.log || []), entry],
+      updatedAt: nextUpdatedAt(item.updatedAt, now),
+    };
+  }
+
+  // Actions.add/update in app.js route through these two rather than
+  // patching Store.items inline, for the same reason as the mutations
+  // above — found in the Phase 1 review as a carried-over gap: add/update
+  // were still stamping updatedAt = Date.now() directly in app.js,
+  // un-tested and without the clock-skew guard every other mutation gets.
+  function createItem(v, now = Date.now(), idFn = uid) {
+    return { id: idFn(), ...v, log: [], addedAt: now, updatedAt: now, reviewedAt: now };
+  }
+
+  function updateItem(item, patch, now = Date.now()) {
+    return { ...item, ...patch, updatedAt: nextUpdatedAt(item.updatedAt, now) };
+  }
+
+  // Merges a freshly-read data file into the renderer's in-memory Store
+  // (renderer/app.js's Sync.reload(), pulled out to be unit-testable —
+  // found in review: this used to be inline DOM-adjacent code with no
+  // test), rather than replacing it the way Store.load() does. A plain
+  // replace can lose an edit made in this renderer that hasn't reached
+  // disk yet: a save still in flight when a reload runs would roll the
+  // Store back to the pre-edit copy, and a save still sitting in the
+  // debounce window would then serialize the reloaded (pre-edit) Store
+  // over the edit on disk. The merge is safe for the same reason the rest
+  // of sync is: it's the same last-writer-wins rule that already
+  // reconciles two machines, just applied here to reconcile "the
+  // renderer's in-memory view" against "what main just wrote to disk".
+  // `fromDisk`'s items/arch are migrate()d first, in case the file on
+  // disk predates a schema bump this renderer already knows about.
+  function mergeDiskIntoStore(fromDisk, store) {
+    const merged = mergeState(
+      {
+        items: migrate(Array.isArray(fromDisk.items) ? fromDisk.items : []),
+        arch: migrate(Array.isArray(fromDisk.arch) ? fromDisk.arch : []),
+      },
+      { items: store.items, arch: store.arch }
+    );
+    // Never rolls backwards: a reload landing after an export has set
+    // Store.lastExport in memory but before that save reaches disk must
+    // not roll it back to the stale on-disk value (found in review) — the
+    // "back up your data" nudge would otherwise reappear right after an
+    // export that already happened. `|| 0` treats a missing lastExport on
+    // either side as "never exported" rather than as bigger than a real
+    // timestamp.
+    return {
+      items: merged.items,
+      arch: merged.arch,
+      lastExport: Math.max(fromDisk.lastExport || 0, store.lastExport || 0),
+    };
   }
 
   // Deterministic blip placement: a golden-angle spiral keyed off the id,
@@ -417,11 +486,15 @@ ${groupsHTML}
     stripTombstones,
     mergeItem,
     mergeState,
+    nextUpdatedAt,
     pingItem,
     archiveItem,
     restoreItem,
     purgeItem,
     addLogEntry,
+    createItem,
+    updateItem,
+    mergeDiskIntoStore,
     blipXY,
     escapeHtml,
     buildReportHTML,

@@ -10,6 +10,7 @@
 // so it can be unit-tested under node:test without a DOM.
 const D = window.WorkRadarDomain;
 const AV = window.WorkRadarAuthView;
+const SV = window.WorkRadarSyncView;
 const { PC, SC, CX, CY, R, BACKUP_DAYS, uid, fdt, daysSince, isStale, blipXY, stripTombstones } = D;
 const HAS_API = typeof window !== 'undefined' && !!window.radarAPI;
 
@@ -115,13 +116,18 @@ function commit() {
 
 /* ---------- Actions ---------- */
 const Actions = {
+  // add/update go through domain.js's createItem/updateItem, same as every
+  // mutation below, so the clock-skew-safe updatedAt bump (see
+  // domain.js's nextUpdatedAt) is unit-tested rather than only reachable
+  // through the DOM — found in the Phase 1 review as a gap: these two used
+  // to patch Store.items inline with a bare Date.now(), untested and
+  // without the guard the other mutations already had.
   add(v) {
-    const now = Date.now();
-    Store.items.push({ id: uid(), ...v, log: [], addedAt: now, updatedAt: now, reviewedAt: now });
+    Store.items.push(D.createItem(v, Date.now(), uid));
     commit();
   },
   update(id, v) {
-    Store.items = Store.items.map((i) => (i.id === id ? { ...i, ...v, updatedAt: Date.now() } : i));
+    Store.items = Store.items.map((i) => (i.id === id ? D.updateItem(i, v, Date.now()) : i));
     commit();
   },
   // Every mutation below goes through a pure domain.js function so the
@@ -327,6 +333,76 @@ const Auth = {
     } catch (err) {
       console.error('sign-in failed', err);
       this.showError('SIGN-IN FAILED');
+    }
+  },
+};
+
+/* ---------- Sync status (Phases 4-5 — see docs/supabase-sync-plan.md)
+   ----------
+   Mostly push-only from main: the indicator starts hidden and stays that
+   way until main pushes a real state over 'sync:stateChanged' — which it
+   only does once sync is configured AND the user is signed in (main hides
+   it again with `{ state: null }` on sign-out). init() below also asks
+   for the current status once via syncStatus(), the same way Auth.init()
+   calls authStatus() — see that call's own comment for why the push alone
+   isn't enough. `onSyncReload`
+   is main telling the renderer "I just merged in a pull — your in-memory
+   Store is now behind the data file", so it reloads and re-renders
+   rather than trusting its own state. */
+const Sync = {
+  init() {
+    if (!HAS_API || !window.radarAPI.onSyncStateChanged) return;
+    window.radarAPI.onSyncStateChanged((status) => this.render(status));
+    if (window.radarAPI.onSyncReload) {
+      window.radarAPI.onSyncReload(() => this.reload());
+    }
+    // Ask for the current status once, the same way Auth.init() calls
+    // authStatus() — the push alone can otherwise reach nobody (main can
+    // start the engine and push a status before this listener above is
+    // even registered, and identical pushes are deduped), leaving the
+    // indicator stuck hidden for the rest of the session (found in
+    // review) — same again after a window reload.
+    if (window.radarAPI.syncStatus) {
+      window.radarAPI
+        .syncStatus()
+        .then((state) => this.render({ state }))
+        .catch((err) => console.error('syncStatus failed', err));
+    }
+  },
+  render(status) {
+    const view = SV.computeSyncView(status);
+    const el = document.getElementById('sync-status');
+    el.hidden = view.hidden;
+    el.textContent = view.label;
+    el.className = 'auth-status' + (view.className ? ' ' + view.className : '');
+  },
+  async reload() {
+    try {
+      // Merges the file's contents into Store rather than replacing it
+      // (Store.load() does the latter) — a plain replace can lose an
+      // edit made in this renderer that hasn't reached disk yet: a save
+      // still in-flight when this runs would have Store rolled back to
+      // the pre-edit copy, and a save still sitting in scheduleSave's
+      // 120ms debounce window would later serialize the *reloaded*
+      // (pre-edit) Store, overwriting the edit for good (found in
+      // review — the same class of save race this whole phase exists to
+      // fix, just on the renderer's side of the file instead of main's).
+      // The merge logic itself is domain.js's pure mergeDiskIntoStore
+      // (pulled out of here in a later review pass so it's unit-tested
+      // rather than only reachable through the DOM) — safe for the same
+      // reason the rest of sync is: the same last-writer-wins rule that
+      // already reconciles two machines, applied here to reconcile "the
+      // renderer's in-memory view" against "what main just wrote".
+      const fromDisk = await Persist.load();
+      if (fromDisk) {
+        const merged = D.mergeDiskIntoStore(fromDisk, Store);
+        Store.items = merged.items;
+        Store.arch = merged.arch;
+        Store.lastExport = merged.lastExport;
+      }
+      render();
+    } catch (err) {
+      console.error('reload after sync merge failed', err);
     }
   },
 };
@@ -848,6 +924,7 @@ function drawTicks() {
   startClock();
   startSweep();
   Auth.init().catch((err) => console.error('Auth.init failed', err));
+  Sync.init();
   try {
     await Store.load();
   } catch (err) {
