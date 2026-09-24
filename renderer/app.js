@@ -735,6 +735,7 @@ function renderList() {
   items.forEach((item) => {
     const row = node('button', 'contact-row' + (Store.ui.sel === item.id ? ' selected' : ''));
     row.type = 'button';
+    if (Store.ui.sel === item.id) row.style.borderLeftColor = PC[item.priority];
     row.setAttribute('aria-expanded', String(Store.ui.sel === item.id));
     row.setAttribute('aria-controls', 'detail-panel');
     row.addEventListener('click', () => {
@@ -746,9 +747,10 @@ function renderList() {
     const main = node('div', 'contact-main');
     const left = node('div', 'contact-left');
     const dot = node('span', 'contact-dot');
-    dot.style.background = item.archivedAt ? '#79958b' : PC[item.priority];
+    dot.style.background = item.archivedAt ? '#546e7a' : PC[item.priority];
     left.append(dot, node('span', 'contact-name', item.name));
     const right = node('span', 'contact-right', item.archivedAt ? 'Archived' : item.status);
+    right.style.color = item.archivedAt ? '#546e7a' : SC[item.status];
     main.append(left, right);
     row.append(main);
     const context = [
@@ -820,8 +822,8 @@ function setSeg(group, val) {
     b.classList.toggle('active-seg', on);
     const col = group === 'priority' ? PC[b.dataset.val] : SC[b.dataset.val];
     b.style.background = on ? col + '18' : 'none';
-    b.style.borderColor = on ? col : '#294238';
-    b.style.color = on ? col : '#a5bbb0';
+    b.style.borderColor = on ? col : '#0f2816';
+    b.style.color = on ? col : '#1a4d2e';
     b.setAttribute('aria-pressed', String(on));
   });
 }
