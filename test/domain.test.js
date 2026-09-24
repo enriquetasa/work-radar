@@ -910,9 +910,14 @@ test('blipXY is deterministic and scales radius by status ring', () => {
   assert.ok(distD > distA, 'dormant sits on an outer ring');
 });
 
-test('uid produces distinct values', () => {
-  const ids = new Set(Array.from({ length: 100 }, () => D.uid()));
-  assert.equal(ids.size, 100);
+test('uid returns an RFC 4122 v4 UUID', () => {
+  const uuidV4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+  assert.match(D.uid(), uuidV4);
+});
+
+test('uid produces distinct values across 10,000 calls', () => {
+  const ids = new Set(Array.from({ length: 10000 }, () => D.uid()));
+  assert.equal(ids.size, 10000);
 });
 
 test('migrate initialises log: [] for items without a log', () => {

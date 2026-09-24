@@ -25,8 +25,13 @@
   const CY = 128;
   const R = 110;
 
+  // globalThis.crypto (not a require) so this works both as a browser
+  // global in the sandboxed, contextIsolated renderer (file:// counts as
+  // a secure context in Chromium, so Web Crypto is available) and as
+  // CommonJS under node:test, where globalThis.crypto is Node's Web
+  // Crypto implementation.
   function uid() {
-    return Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+    return globalThis.crypto.randomUUID();
   }
 
   // Small stable string hash (djb2 variant). Used only to derive
