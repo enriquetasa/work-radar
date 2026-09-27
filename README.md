@@ -4,7 +4,7 @@ A situational-awareness radar for the projects orbiting you — the things you m
 
 ## Run it
 
-Requires [Node.js](https://nodejs.org) (18+).
+Development/builds use [Node.js](https://nodejs.org) 24 (`nvm use`). Packaged apps include their runtime; recipients do not need Node or npm.
 
 ```bash
 cd work-radar
@@ -15,12 +15,28 @@ npm start
 ## Build a desktop app
 
 ```bash
-npm run build:mac     # → dist/Work Radar-2.0.0.dmg
-npm run build:win     # → dist/Work Radar Setup 2.0.0.exe
-npm run build:linux   # → dist/Work Radar-2.0.0.AppImage
+npm ci
+npm run build:mac -- --arm64 --publish never  # Apple Silicon DMG + ZIP
+npm run build:mac -- --x64 --publish never    # Intel DMG + ZIP
+npm run build:win -- --x64 --publish never    # installer + portable EXE
+npm run build:linux -- --x64 --publish never  # AppImage
 ```
 
-Install the artifact from `dist/` like any other app. On macOS the build is unsigned, so the first launch needs right-click → Open (or `System Settings → Privacy & Security → Open Anyway`). Signing requires an Apple Developer ID — add it to the `build.mac` block in `package.json` if you want notarization.
+Build on the corresponding OS. Downloads appear in `dist/` with version,
+platform, and architecture in their filenames. Every build command regenerates
+the icon and release configuration through the same Electron Builder hook.
+
+To make a build that is ready for invited users to sign in, supply
+`WORK_RADAR_RELEASE_SUPABASE_URL` and `WORK_RADAR_RELEASE_SUPABASE_KEY` at
+build time. Only a publishable/anon key is accepted. Both variables must be set
+together; neither set produces a local-only build with the existing setup prompt.
+`WORK_RADAR_REQUIRE_SYNC=1` makes missing configuration a build error.
+Runtime `WORK_RADAR_SUPABASE_*` variables are not automatically embedded.
+
+See [Distribution and release setup](docs/distribution.md) for GitHub Actions,
+signing credentials, hosted Supabase checks, and fresh-install testing.
+Tag builds create a **draft** release; manual workflow runs only upload artifacts.
+Automatic updates are deferred until the first release is validated.
 
 ### Launch on login
 
@@ -62,7 +78,7 @@ When configured, sync lets the same data follow you between machines:
 ### Setting up a Supabase project
 
 The app never creates the server side of sync for you — a hosted project
-needs three things set up before sign-in or sync will work at all (see
+needs four things set up before sign-in or sync will work at all (see
 [Phase 0 of the sync plan](docs/supabase-sync-plan.md#phases) and the
 [Sign-in flow](docs/supabase-sync-plan.md#sign-in-flow) for the full
 detail):
@@ -88,11 +104,17 @@ detail):
    be able to sign in; anyone else gets a sign-in error instead of "CHECK
    YOUR INBOX".
 
+4. **Configure custom SMTP** for magic-link delivery to recipients outside
+   your Supabase organization team. Creating an app user does not make them a
+   Supabase team member. The default mail service is restricted to team addresses;
+   see [Supabase SMTP documentation](https://supabase.com/docs/guides/auth/auth-smtp).
+
 ### Configuring it
 
 The app ships with a **built-in default Supabase project URL** (a public
-identifier, not a secret — see the secrets rule), so sync only needs a
-**publishable key** to turn on. The URL and key are each resolved
+identifier, not a secret — see the secrets rule), so a development or unconfigured build only needs a
+**publishable key** to turn on. Shared release builds can include both values
+and go straight to sign-in, without a key prompt. The URL and key are each resolved
 independently, checked in this order:
 
 1. **Environment variables** — `WORK_RADAR_SUPABASE_URL` and
@@ -117,10 +139,18 @@ independently, checked in this order:
 
    Either field can be present on its own — a file with just a `url`
    points sync at a different project without supplying a key yet; a file
-   with just a `publishableKey` uses the built-in default URL.
+   with just a `publishableKey` uses the bundled release URL when available,
+   otherwise the built-in default URL.
 
-3. **The startup "add your key" prompt** — if no key is found from either
-   source above, a small overlay asks for one instead of silently staying
+3. **Bundled release configuration** — `release-sync-config.json` in the
+   packaged app's resources. Generated at build time and ignored by Git, this
+   contains only the release project's URL and public key. It is ignored during
+   `npm start`. Environment variables and the userData file take priority.
+   A URL-only override to a different backend does not inherit the bundled key;
+   supply that backend's own key. A trailing slash on the same URL is accepted.
+
+4. **The startup "add your key" prompt** — if no key is found from the
+   sources above, a small overlay asks for one instead of silently staying
    local forever. Paste a publishable key (`sb_publishable_…`) or a legacy
    anon JWT and hit **SAVE** to write it into `sync-config.json` and bring
    sync up immediately, no restart needed; **NOT NOW** keeps the app fully
@@ -282,7 +312,7 @@ npm run test:integration   # sync tests against a local Supabase stack — see
                             # "Developing against sync" above
 ```
 
-`npm run build` runs the icon generator first (`prebuild`).
+All build commands run the icon generator and regenerate public release configuration via `scripts/prepare-build.js`.
 
 ## Architecture
 

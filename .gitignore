@@ -5,3 +5,6 @@ dist/
 
 # Transient icon build dir (icon.png / icon.icns are committed; this is temp).
 build/icon.iconset/
+
+# Generated public configuration for this build only.
+build/release-sync-config.json

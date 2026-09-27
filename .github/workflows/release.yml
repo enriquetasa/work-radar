@@ -1,0 +1,111 @@
+name: Desktop release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - name: Check tag matches package version
+        if: startsWith(github.ref, 'refs/tags/')
+        run: node -e 'if (process.env.GITHUB_REF_NAME !== "v" + require("./package.json").version) process.exit(1)'
+      - run: npm run check
+      - name: Apply migrations to a fresh local Supabase database
+        run: npx supabase start
+      - run: npm run test:integration
+      - name: Stop local Supabase
+        if: always()
+        run: npx supabase stop --no-backup
+
+  build:
+    needs: verify
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15
+            platform: mac
+            arch: arm64
+          - os: macos-15
+            platform: mac
+            arch: x64
+          - os: windows-latest
+            platform: win
+            arch: x64
+          - os: ubuntu-24.04
+            platform: linux
+            arch: x64
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - name: Build desktop downloads
+        run: npm run build -- --${{ matrix.platform }} --${{ matrix.arch }} --publish never
+        env:
+          WORK_RADAR_REQUIRE_SYNC: '1'
+          WORK_RADAR_RELEASE_SUPABASE_URL: ${{ vars.WORK_RADAR_RELEASE_SUPABASE_URL }}
+          WORK_RADAR_RELEASE_SUPABASE_KEY: ${{ secrets.WORK_RADAR_RELEASE_SUPABASE_KEY }}
+          CSC_LINK: ${{ matrix.platform == 'mac' && secrets.MAC_CSC_LINK || matrix.platform == 'win' && secrets.WIN_CSC_LINK || '' }}
+          CSC_KEY_PASSWORD: ${{ matrix.platform == 'mac' && secrets.MAC_CSC_KEY_PASSWORD || matrix.platform == 'win' && secrets.WIN_CSC_KEY_PASSWORD || '' }}
+          APPLE_ID: ${{ matrix.platform == 'mac' && secrets.APPLE_ID || '' }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ matrix.platform == 'mac' && secrets.APPLE_APP_SPECIFIC_PASSWORD || '' }}
+          APPLE_TEAM_ID: ${{ matrix.platform == 'mac' && secrets.APPLE_TEAM_ID || '' }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: work-radar-${{ matrix.platform }}-${{ matrix.arch }}
+          if-no-files-found: error
+          path: |
+            dist/*.dmg
+            dist/*.zip
+            dist/*.exe
+            dist/*.AppImage
+
+  draft-release:
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: work-radar-*
+          path: downloads
+          merge-multiple: true
+      - name: Calculate download checksums
+        working-directory: downloads
+        run: sha256sum * > SHA256SUMS.txt
+      - name: Create or refresh the draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          if gh release view "$RELEASE_TAG" --json isDraft > /tmp/work-radar-release.json 2>/dev/null; then
+            node -e 'if (!require("/tmp/work-radar-release.json").isDraft) { console.error("Refusing to replace a published release."); process.exit(1); }'
+            gh release upload "$RELEASE_TAG" downloads/* --clobber
+          else
+            gh release create "$RELEASE_TAG" downloads/* --draft --verify-tag --title "Work Radar $RELEASE_TAG" --notes-file docs/release-notes.md
+          fi

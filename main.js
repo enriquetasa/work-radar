@@ -31,6 +31,13 @@ const WINSTATE = () => path.join(app.getPath('userData'), 'window-state.json');
 const ICON_PNG = path.join(__dirname, 'build', 'icon.png');
 const MAX_BACKUPS = 30;
 
+function getSyncConfig() {
+  return resolveSyncConfig({
+    userDataDir: app.getPath('userData'),
+    bundledConfigDir: app.isPackaged ? process.resourcesPath : undefined,
+  });
+}
+
 let win = null;
 let authService = null;
 let syncEngine = null;
@@ -167,7 +174,7 @@ ipcMain.handle('data:revealBackups', async () => {
 const SESSION_FILE = () => path.join(app.getPath('userData'), 'sync-session.enc');
 
 function buildAuthService() {
-  const syncConfig = resolveSyncConfig({ userDataDir: app.getPath('userData') });
+  const syncConfig = getSyncConfig();
   if (!syncConfig.configured) {
     log.debug('sync not configured — auth disabled');
     return null;
@@ -293,7 +300,7 @@ ipcMain.handle('auth:signOut', async () => {
 });
 
 ipcMain.handle('syncConfig:needsKey', async () => {
-  const syncConfig = resolveSyncConfig({ userDataDir: app.getPath('userData') });
+  const syncConfig = getSyncConfig();
   return !syncConfig.configured;
 });
 

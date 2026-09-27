@@ -8,9 +8,9 @@ const { validatePublishableKey } = require('./key-validation');
 const DEFAULT_SUPABASE_URL = 'https://kqoudumymsmvstrfrxyz.supabase.co';
 
 // This file is user-editable, so malformed input disables sync instead of crashing startup.
-function readSyncConfigFile(userDataDir, readFileSync, logger) {
+function readSyncConfigFile(userDataDir, readFileSync, logger, filename = 'sync-config.json') {
   if (!userDataDir) return { url: '', publishableKey: '' };
-  const configPath = path.join(userDataDir, 'sync-config.json');
+  const configPath = path.join(userDataDir, filename);
   let raw;
   try {
     raw = readFileSync(configPath, 'utf8');
@@ -56,6 +56,7 @@ function validateCandidateKey(candidate, source, logger) {
 function resolveSyncConfig({
   env = process.env,
   userDataDir,
+  bundledConfigDir,
   readFileSync = fs.readFileSync,
   log: logger = log,
 } = {}) {
@@ -72,11 +73,27 @@ function resolveSyncConfig({
 
   const file = readSyncConfigFile(userDataDir, readFileSync, logger);
   const fileKey = validateCandidateKey(file.publishableKey, 'sync-config.json', logger);
-  const url = envUrl || file.url || DEFAULT_SUPABASE_URL;
-  const publishableKey = envKey || fileKey;
+  const bundled = readSyncConfigFile(
+    bundledConfigDir,
+    readFileSync,
+    logger,
+    'release-sync-config.json'
+  );
+  const url = envUrl || file.url || bundled.url || DEFAULT_SUPABASE_URL;
+  // A custom backend must never inherit another project's bundled key.
+  const bundledKey =
+    bundled.url && url.replace(/\/$/, '') === bundled.url.replace(/\/$/, '')
+      ? validateCandidateKey(bundled.publishableKey, 'release-sync-config.json', logger)
+      : '';
+  const publishableKey = envKey || fileKey || bundledKey;
 
   if (publishableKey) {
-    return { configured: true, url, publishableKey, source: envKey ? 'env' : 'file' };
+    return {
+      configured: true,
+      url,
+      publishableKey,
+      source: envKey ? 'env' : fileKey ? 'file' : 'bundle',
+    };
   }
   return { configured: false, url };
 }

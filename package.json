@@ -15,7 +15,6 @@
     "test": "node --test test/*.test.js",
     "test:integration": "node --test test/integration/*.test.js",
     "check": "npm run lint && npm run format:check && npm test",
-    "prebuild": "npm run icon",
     "build": "electron-builder",
     "build:mac": "electron-builder --mac",
     "build:win": "electron-builder --win",
@@ -48,12 +47,14 @@
     "mac": {
       "category": "public.app-category.productivity",
       "target": [
-        "dmg"
+        "dmg",
+        "zip"
       ]
     },
     "win": {
       "target": [
-        "nsis"
+        "nsis",
+        "portable"
       ]
     },
     "linux": {
@@ -61,6 +62,21 @@
         "AppImage"
       ],
       "category": "Utility"
+    },
+    "beforePack": "scripts/prepare-build.js",
+    "artifactName": "Work-Radar-${version}-${os}-${arch}.${ext}",
+    "extraResources": [
+      {
+        "from": "build/release-sync-config.json",
+        "to": "release-sync-config.json"
+      }
+    ],
+    "nsis": {
+      "artifactName": "Work-Radar-${version}-windows-${arch}-setup.${ext}",
+      "deleteAppDataOnUninstall": false
+    },
+    "portable": {
+      "artifactName": "Work-Radar-${version}-windows-${arch}-portable.${ext}"
     }
   },
   "dependencies": {
