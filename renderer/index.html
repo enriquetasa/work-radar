@@ -18,6 +18,9 @@
           ><span id="header-sub">SITUATIONAL AWARENESS</span>
         </div>
         <div id="header-tools">
+          <button id="settings-open" class="tool-btn" type="button" aria-haspopup="dialog">
+            Settings
+          </button>
           <div id="auth-panel" hidden>
             <form id="auth-form" hidden>
               <input
@@ -140,8 +143,20 @@
                   autocomplete="off"
                   placeholder="PROJECT / DESIGNATION"
                 />
-                <label for="f-cat">Category</label
-                ><input id="f-cat" autocomplete="off" placeholder="Team, area, or personal" />
+                <div class="category-label">
+                  <label for="f-cat">Category</label>
+                  <button
+                    id="category-manage"
+                    class="tool-btn"
+                    type="button"
+                    aria-haspopup="dialog"
+                  >
+                    Manage categories
+                  </button>
+                </div>
+                <select id="f-cat">
+                  <option value="">No category</option>
+                </select>
                 <div class="form-row" role="group" aria-label="Project status">
                   <span class="form-row-label">Status</span
                   ><button type="button" class="seg-btn" data-group="status" data-val="active">
@@ -184,13 +199,18 @@
                     <label for="f-interval">Every (days)</label
                     ><input id="f-interval" type="number" min="1" max="3650" step="1" value="14" />
                   </div>
-                  <div>
-                    <label for="f-review">Next review</label
-                    ><input id="f-review" type="date" aria-describedby="review-help" />
-                  </div>
+                </div>
+                <label for="f-review">Next review date</label>
+                <input id="f-review" type="date" aria-describedby="review-help" />
+                <div class="review-shortcuts" role="group" aria-label="Set next review date">
+                  <button type="button" class="tool-btn" data-review-days="1">Tomorrow</button>
+                  <button type="button" class="tool-btn" data-review-days="3">In 3 days</button>
+                  <button type="button" class="tool-btn" data-review-days="7">In a week</button>
+                  <button type="button" class="tool-btn" data-review-days="14">In 2 weeks</button>
                 </div>
                 <p id="review-help" class="field-help">
-                  Leave the date blank to use the review rhythm.
+                  When to check this project again. Shortcuts count from today; leave blank to use
+                  the recurring review rhythm.
                 </p>
                 <label for="f-waiting">Waiting on</label
                 ><input
@@ -198,16 +218,17 @@
                   autocomplete="off"
                   placeholder="A person, team, or event (optional)"
                 />
-                <label for="f-checkpoint">Next checkpoint</label
+                <label for="f-checkpoint">Checkpoint (optional)</label
                 ><input
                   id="f-checkpoint"
                   autocomplete="off"
                   placeholder="What are you expecting to happen?"
                 />
-                <label for="f-checkpoint-date">Checkpoint / follow-up date</label
+                <label for="f-checkpoint-date">Checkpoint date (optional)</label
                 ><input id="f-checkpoint-date" type="date" aria-describedby="checkpoint-help" />
                 <p id="checkpoint-help" class="field-help">
-                  Surfaces in Today when due, until you complete or reschedule it.
+                  For an expected reply or milestone, separate from your project review. Appears in
+                  Today when due.
                 </p>
               </div>
             </div>
@@ -224,6 +245,27 @@
       </footer>
       <input type="file" id="import-file" accept="application/json,.json" hidden />
     </div>
+
+    <dialog id="settings-dialog" aria-labelledby="settings-title">
+      <form id="settings-form">
+        <h2 id="settings-title">◈ SETTINGS</h2>
+        <h3 class="eyebrow">PROJECT CATEGORIES</h3>
+        <p class="panel-copy">
+          Choose the categories available when creating or editing a project. Existing project
+          labels stay unchanged when you rename or delete an option.
+        </p>
+        <p class="field-help">
+          These dropdown choices are saved for this profile on this device and included in backups.
+        </p>
+        <div id="category-list"></div>
+        <p id="category-empty" class="panel-copy">No categories yet. Add one to get started.</p>
+        <button id="category-add" class="form-act" type="button">+ Add category</button>
+        <div class="panel-actions">
+          <button id="settings-cancel" class="form-act" type="button">Cancel</button>
+          <button class="form-act primary" type="submit">Save settings</button>
+        </div>
+      </form>
+    </dialog>
 
     <div
       id="briefing-overlay"

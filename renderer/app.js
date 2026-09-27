@@ -52,6 +52,7 @@ const Store = {
   attachments: [],
   attachmentRecords: [],
   profileId: null,
+  categoryOptions: null,
   ui: {
     view: 'today',
     filter: 'all',
@@ -100,24 +101,25 @@ const Store = {
     this.attachments = Array.isArray(d.attachments) ? d.attachments : [];
     this.attachmentRecords = Array.isArray(d.attachmentRecords) ? d.attachmentRecords : [];
     this.profileId = d.profileId || null;
+    this.categoryOptions = Array.isArray(d.categoryOptions)
+      ? D.normalizeCategories(d.categoryOptions)
+      : null;
   },
   serialize() {
     return D.serialize(this);
   },
 };
 
-/* ---------- Debounced save ---------- */
+/* ---------- Serialized saves ---------- */
 let saveQueue = Promise.resolve();
 let saveGeneration = 0;
 function invalidatePendingSaves() {
   saveGeneration += 1;
-  pendingSaveOptions = {};
 }
 // Set when Store.load() fails at boot (see boot() below). Store.items/arch
 // then stay at their empty initial value, so saving would overwrite the
 // user's real data file with nothing; refuse until the app is restarted.
 let loadFailed = false;
-let pendingSaveOptions = {};
 function mergeSavedMetadata(data) {
   if (!data) return;
   const merge = (current, incoming) => {
@@ -131,14 +133,12 @@ function mergeSavedMetadata(data) {
   Store.attachments = merge(Store.attachments, data.attachments);
   Store.attachmentRecords = merge(Store.attachmentRecords, data.attachmentRecords);
 }
-function scheduleSave() {
+function scheduleSave(options = {}) {
   if (loadFailed) {
     console.error('save skipped: Store.load() failed at boot, refusing to overwrite data file');
     return;
   }
-  const payload = Store.serialize();
-  Object.assign(payload, pendingSaveOptions);
-  pendingSaveOptions = {};
+  const payload = { ...Store.serialize(), ...options };
   const generation = saveGeneration;
   saveQueue = saveQueue
     .then(async () => {
@@ -154,17 +154,19 @@ function scheduleSave() {
 }
 
 function commit(options = {}) {
-  pendingSaveOptions = { ...pendingSaveOptions, ...options };
-  scheduleSave();
+  scheduleSave(options);
   render();
 }
 function clearRendererProfile() {
+  Settings.close();
+  Store.categoryOptions = null;
   Store.items = [];
   Store.arch = [];
   Store.itemRevisions = [];
   Store.attachments = [];
   Store.attachmentRecords = [];
   Store.profileId = null;
+  Store.lastExport = 0;
   Store.ui.sel = null;
   Store.ui.search = '';
   Store.ui.showForm = false;
@@ -320,8 +322,8 @@ const Actions = {
     }
     const inItems = D.migrate(Array.isArray(d.items) ? d.items : []);
     const inArch = D.migrate(Array.isArray(d.arch) ? d.arch : []);
-    if (!inItems.length && !inArch.length) {
-      alert('NO CONTACTS FOUND IN FILE.');
+    if (!inItems.length && !inArch.length && !Array.isArray(d.categoryOptions)) {
+      alert('NO PROJECTS OR CATEGORY SETTINGS FOUND IN FILE.');
       return false;
     }
     // Count live/archived contacts, not tombstones — a file holding only
@@ -349,6 +351,10 @@ const Actions = {
       { items: Store.items, arch: Store.arch },
       { items: inItems, arch: inArch }
     );
+    Store.categoryOptions = D.normalizeCategories([
+      ...D.categoryOptions(Store),
+      ...D.categoryOptions({ ...d, items: inItems, arch: inArch }),
+    ]);
     Store.items = merged.items;
     Store.arch = merged.arch;
     const mergeById = (left, right) => {
@@ -723,6 +729,80 @@ const Onboarding = {
   },
 };
 
+const Settings = {
+  open() {
+    Account.close();
+    const list = document.getElementById('category-list');
+    list.replaceChildren();
+    for (const name of D.categoryOptions(Store)) this.addRow(name);
+    this.updateEmptyState();
+    document.getElementById('settings-dialog').showModal();
+    (list.querySelector('input') || document.getElementById('category-add')).focus();
+  },
+  close() {
+    const dialog = document.getElementById('settings-dialog');
+    if (dialog.open) dialog.close();
+  },
+  updateEmptyState() {
+    document.getElementById('category-empty').hidden =
+      document.getElementById('category-list').childElementCount > 0;
+  },
+  addRow(name = '') {
+    const row = node('div', 'category-row');
+    const input = node('input');
+    input.value = name;
+    input.required = true;
+    input.autocomplete = 'off';
+    input.placeholder = 'Category name';
+    input.setAttribute('aria-label', 'Category name');
+    input.addEventListener('input', () => {
+      document
+        .querySelectorAll('#category-list input')
+        .forEach((field) => field.setCustomValidity(''));
+    });
+    const remove = button(
+      'Delete',
+      () => {
+        const next = row.nextElementSibling || row.previousElementSibling;
+        row.remove();
+        document
+          .querySelectorAll('#category-list input')
+          .forEach((field) => field.setCustomValidity(''));
+        this.updateEmptyState();
+        (next?.querySelector('input') || document.getElementById('category-add')).focus();
+      },
+      'form-act danger'
+    );
+    row.append(input, remove);
+    document.getElementById('category-list').append(row);
+    this.updateEmptyState();
+    return input;
+  },
+  save(event) {
+    event.preventDefault();
+    const inputs = [...document.querySelectorAll('#category-list input')];
+    const seen = new Set();
+    for (const input of inputs) {
+      const key = input.value.trim().toLowerCase();
+      input.setCustomValidity(
+        !key ? 'Enter a category name.' : seen.has(key) ? 'This category is already listed.' : ''
+      );
+      seen.add(key);
+    }
+    if (!document.getElementById('settings-form').reportValidity()) return;
+    if (loadFailed) {
+      alert(
+        'Settings cannot be saved until your project data loads successfully. Restart the app.'
+      );
+      return;
+    }
+    Store.categoryOptions = D.normalizeCategories(inputs.map((input) => input.value));
+    if (Store.ui.showForm) fillCategories(document.getElementById('f-cat').value);
+    commit();
+    this.close();
+  },
+};
+
 const Briefing = {
   preferences: null,
   signedIn: false,
@@ -1046,21 +1126,8 @@ const Sync = {
   },
   async reload() {
     try {
-      // Merges the file's contents into Store rather than replacing it
-      // (Store.load() does the latter) — a plain replace can lose an
-      // edit made in this renderer that hasn't reached disk yet: a save
-      // still in-flight when this runs would have Store rolled back to
-      // the pre-edit copy, and a save still sitting in scheduleSave's
-      // 120ms debounce window would later serialize the *reloaded*
-      // (pre-edit) Store, overwriting the edit for good (found in
-      // review — the same class of save race this whole phase exists to
-      // fix, just on the renderer's side of the file instead of main's).
-      // The merge logic itself is domain.js's pure mergeDiskIntoStore
-      // (pulled out of here in a later review pass so it's unit-tested
-      // rather than only reachable through the DOM) — safe for the same
-      // reason the rest of sync is: the same last-writer-wins rule that
-      // already reconciles two machines, applied here to reconcile "the
-      // renderer's in-memory view" against "what main just wrote".
+      // Merge same-profile data so edits still waiting to save survive a disk reload.
+      // Switching profiles replaces the store to keep account data separate.
       const fromDisk = await Persist.load();
       if (
         fromDisk &&
@@ -1082,6 +1149,7 @@ const Sync = {
                 ? fromDisk.attachmentRecords
                 : [],
               profileId: fromDisk.profileId ?? null,
+              categoryOptions: fromDisk.categoryOptions ?? null,
             }
           : D.mergeDiskIntoStore(fromDisk, Store);
         Store.items = merged.items;
@@ -1097,14 +1165,9 @@ const Sync = {
           ? merged.attachmentRecords
           : Store.attachmentRecords;
         Store.profileId = merged.profileId ?? null;
+        Store.categoryOptions = merged.categoryOptions ?? null;
       } else {
-        Store.items = [];
-        Store.arch = [];
-        Store.itemRevisions = [];
-        Store.attachments = [];
-        Store.attachmentRecords = [];
-        Store.profileId = null;
-        Store.ui.sel = null;
+        clearRendererProfile();
       }
       render();
     } catch (err) {
@@ -1595,9 +1658,7 @@ function render() {
   const today = Store.ui.view === 'today';
   const archive = Store.ui.view === 'archive';
   const recovery = Store.ui.view === 'recovery';
-  document
-    .getElementById('body')
-    .classList.toggle('editing-project', Store.ui.showForm && Store.ui.view === 'all');
+  document.getElementById('body').classList.toggle('editing-project', Store.ui.showForm);
   document.getElementById('today-count').textContent = stripTombstones(Store.items).filter((i) =>
     D.isDueToday(i)
   ).length;
@@ -1629,12 +1690,11 @@ function render() {
     month: 'short',
     day: 'numeric',
   });
-  document.getElementById('kbd-hint').textContent =
-    Store.ui.showForm && Store.ui.view === 'all'
-      ? 'Ctrl/Cmd+Enter save · Esc cancel'
-      : 'N new · / search · ' +
-        (Store.ui.view === 'all' ? 'E edit · ' : '') +
-        'R reviewed · Esc close';
+  document.getElementById('kbd-hint').textContent = Store.ui.showForm
+    ? 'Ctrl/Cmd+Enter save · Esc cancel'
+    : 'N new · / search · ' +
+      (Store.ui.view === 'all' ? 'E edit · ' : '') +
+      'R reviewed · Esc close';
   document.getElementById('form-panel').hidden = !Store.ui.showForm;
   renderList();
   renderDetail();
@@ -1675,6 +1735,23 @@ function getSeg(group) {
   return v;
 }
 
+function fillCategories(selected = '') {
+  const select = document.getElementById('f-cat');
+  const names = D.categoryOptions(Store);
+  const choices = [
+    node('option', '', 'No category'),
+    ...names.map((name) => node('option', '', name)),
+  ];
+  choices[0].value = '';
+  if (selected && !names.includes(selected)) {
+    const current = node('option', '', selected + ' (current)');
+    current.value = selected;
+    choices.push(current);
+  }
+  select.replaceChildren(...choices);
+  select.value = selected;
+}
+
 function openAdd() {
   Store.ui.showForm = true;
   Store.ui.editId = null;
@@ -1682,7 +1759,7 @@ function openAdd() {
   document.getElementById('form-label').textContent = 'New project';
   document.getElementById('form-save').textContent = 'Create project';
   document.getElementById('f-name').value = '';
-  document.getElementById('f-cat').value = '';
+  fillCategories();
   document.getElementById('f-notes').value = '';
   fillSchedule({ reviewIntervalDays: 14 });
   setSeg('status', 'active');
@@ -1699,7 +1776,7 @@ function openEdit(it) {
   document.getElementById('form-label').textContent = 'Edit project · ' + it.name;
   document.getElementById('form-save').textContent = 'Save changes';
   document.getElementById('f-name').value = it.name;
-  document.getElementById('f-cat').value = it.category || '';
+  fillCategories(it.category || '');
   document.getElementById('f-notes').value = it.notes || '';
   fillSchedule(it);
   setSeg('status', it.status);
@@ -1771,6 +1848,15 @@ function saveForm() {
 
 /* ---------- Wiring ---------- */
 function wire() {
+  document.getElementById('settings-open').addEventListener('click', () => Settings.open());
+  document.getElementById('category-manage').addEventListener('click', () => Settings.open());
+  document
+    .getElementById('category-add')
+    .addEventListener('click', () => Settings.addRow().focus());
+  document.getElementById('settings-cancel').addEventListener('click', () => Settings.close());
+  document
+    .getElementById('settings-form')
+    .addEventListener('submit', (event) => Settings.save(event));
   document
     .querySelectorAll('.tab')
     .forEach((t) => t.addEventListener('click', () => switchView(t.dataset.view)));
@@ -1784,6 +1870,11 @@ function wire() {
   document.getElementById('detail-close').addEventListener('click', () => {
     Store.ui.sel = null;
     render();
+  });
+  document.querySelectorAll('[data-review-days]').forEach((button) => {
+    button.addEventListener('click', () => {
+      document.getElementById('f-review').value = dateAfter(Number(button.dataset.reviewDays));
+    });
   });
   document.getElementById('f-rhythm').addEventListener('change', () => {
     updateRhythm();
@@ -1819,7 +1910,12 @@ function wire() {
     const refreshAttachments = () => {
       const refresh = window.radarAPI.attachmentsRefresh?.();
       const queue = window.radarAPI.attachmentsProcessQueue?.();
-      Promise.allSettled([refresh, queue]).catch(() => {});
+      Promise.allSettled([refresh, queue]).then((results) => {
+        for (const result of results) {
+          if (result.status === 'rejected')
+            console.error('attachment refresh failed', result.reason);
+        }
+      });
     };
     window.addEventListener('focus', refreshAttachments);
     if (typeof window.setInterval === 'function') window.setInterval(refreshAttachments, 60000);
@@ -1852,6 +1948,7 @@ function wire() {
   });
 
   document.addEventListener('keydown', (e) => {
+    if (document.getElementById('settings-dialog').open) return;
     // Block app shortcuts while the modal is open; Escape dismisses it.
     if (SyncConfigPrompt.isOpen()) {
       if (e.key === 'Escape') {
@@ -1874,12 +1971,7 @@ function wire() {
       }
       return;
     }
-    if (
-      Store.ui.showForm &&
-      Store.ui.view === 'all' &&
-      (e.ctrlKey || e.metaKey) &&
-      e.key === 'Enter'
-    ) {
+    if (Store.ui.showForm && (e.ctrlKey || e.metaKey) && e.key === 'Enter') {
       e.preventDefault();
       saveForm();
       return;
@@ -1902,6 +1994,7 @@ function wire() {
   // Native menu commands (Electron)
   if (HAS_API && window.radarAPI.onMenu) {
     window.radarAPI.onMenu((action) => {
+      if (document.getElementById('settings-dialog').open) return;
       if (action === 'new') openAdd();
       else if (action === 'search') focusSearch();
       else if (action === 'export') Actions.exportJSON();

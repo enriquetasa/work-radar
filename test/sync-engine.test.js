@@ -2236,3 +2236,28 @@ test('default pushes retain pending schedules until the cloud schema supports th
     await fsp.rm(dir, { recursive: true, force: true });
   }
 });
+
+test('signed-in saves persist category settings and preserve them on later project saves', async (t) => {
+  const dir = await tmpDir();
+  t.after(() => fsp.rm(dir, { recursive: true, force: true }));
+  const dataFilePath = path.join(dir, 'data.json');
+  const engine = createSyncEngine({
+    client: makeClient('u1'),
+    dataFilePath,
+    syncStateFilePath: path.join(dir, 'sync-state.json'),
+    log: silentLog,
+    pushItemsRpc: acceptAll(),
+    pushLogEntriesRpc: acceptAll(),
+    pullItemsPage: emptyPage,
+    pullLogEntriesPage: emptyPage,
+  });
+  t.after(() => engine.stop());
+  const data = { schema: 3, items: [item('A', { category: 'Legacy' })], arch: [], lastExport: 0 };
+  await engine.recordLocalSave({ ...data, categoryOptions: [' Team ', 'team', 'Personal'] });
+  assert.deepEqual((await readJsonFile(dataFilePath)).categoryOptions, ['Personal', 'Team']);
+  await engine.recordLocalSave({ ...data, categoryOptions: [] });
+  await engine.recordLocalSave(data);
+  const saved = await readJsonFile(dataFilePath);
+  assert.deepEqual(saved.categoryOptions, []);
+  assert.equal(saved.items[0].category, 'Legacy');
+});

@@ -214,6 +214,26 @@
       });
   }
 
+  function normalizeCategories(values) {
+    const names = new Map();
+    for (const value of values) {
+      if (typeof value !== 'string' || !value.trim()) continue;
+      const name = value.trim();
+      const key = name.toLowerCase();
+      if (!names.has(key)) names.set(key, name);
+    }
+    return [...names.values()].sort((a, b) => a.localeCompare(b));
+  }
+
+  function categoryOptions(state) {
+    if (Array.isArray(state.categoryOptions)) return normalizeCategories(state.categoryOptions);
+    return normalizeCategories(
+      [...(state.items || []), ...(state.arch || [])]
+        .filter((item) => !item.deletedAt)
+        .map((item) => item.category)
+    );
+  }
+
   function serialize(state) {
     const data = {
       schema: SCHEMA,
@@ -224,9 +244,11 @@
     // History, attachment metadata, and future additive envelope fields are
     // intentionally copied through export/import. Keep the legacy shape when
     // no feature metadata exists so older backups remain compatible.
-    ['itemRevisions', 'attachments', 'attachmentRecords', 'profileId'].forEach((key) => {
-      if (state[key] !== undefined) data[key] = state[key];
-    });
+    ['itemRevisions', 'attachments', 'attachmentRecords', 'profileId', 'categoryOptions'].forEach(
+      (key) => {
+        if (state[key] !== undefined) data[key] = state[key];
+      }
+    );
     return data;
   }
 
@@ -583,6 +605,10 @@ ${groupsHTML}
         mergedState[key] = store[key] !== undefined ? store[key] : fromDisk[key];
       }
     });
+    // Keep unsaved dropdown edits, including an explicitly emptied list.
+    if (store.categoryOptions !== undefined || fromDisk.categoryOptions !== undefined) {
+      mergedState.categoryOptions = store.categoryOptions ?? fromDisk.categoryOptions ?? null;
+    }
     return mergedState;
   }
 
@@ -624,6 +650,8 @@ ${groupsHTML}
     isStale,
     migrate,
     serialize,
+    normalizeCategories,
+    categoryOptions,
     selectVisible,
     stripTombstones,
     mergeItem,

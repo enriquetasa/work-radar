@@ -87,8 +87,7 @@ function mergeIntoData(current, incoming, lastExport) {
     lastExport,
   };
   if (incoming && Array.isArray(incoming.itemRevisions)) next = history.merge(next, incoming);
-  next = history.baselineData(next);
-  return { ...next, itemRevisions: history.retain(next.itemRevisions || []) };
+  return history.baselineData(next);
 }
 
 function createSyncEngine(options = {}) {
@@ -195,7 +194,7 @@ function createSyncEngine(options = {}) {
   function withDataFile(mutator, guard = () => true) {
     const run = dataQueue.then(async () => {
       if (!guard()) return { data: null, result: null };
-      // Capture the active profile path for the whole serialized operation; an account switch can change the resolver while an old write is in flight.
+      // Keep this operation on the profile this engine was created for.
       const filePath = dataFilePath;
       const raw = (await readDataFile(filePath, { log })) || emptyData();
       if (Number.isSafeInteger(raw.schema) && raw.schema > domain.SCHEMA) {
@@ -256,6 +255,9 @@ function createSyncEngine(options = {}) {
           },
           payload.lastExport ?? current.lastExport ?? 0
         );
+        if (Array.isArray(payload.categoryOptions)) {
+          nextData.categoryOptions = domain.normalizeCategories(payload.categoryOptions);
+        }
         const diff = outbox.diffSnapshot(outbox.snapshotOf(current), outbox.snapshotOf(nextData));
         const changedItems = diff.changedItemIds
           .map((id) => findLocalItem(nextData, id))
