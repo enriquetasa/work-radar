@@ -29,17 +29,36 @@
               /><button type="submit" id="auth-submit" class="tool-btn">Sign in</button>
             </form>
             <span id="auth-pending" class="auth-status" hidden>Check your inbox</span>
-            <span id="auth-signed-in" class="auth-status" hidden
-              ><strong id="auth-email-label"></strong
-            ></span>
+            <button
+              id="auth-signed-in"
+              class="account-control"
+              type="button"
+              hidden
+              aria-haspopup="dialog"
+              aria-expanded="false"
+            >
+              <strong id="auth-email-label"></strong>
+            </button>
+            <div id="account-menu" class="account-menu" role="dialog" aria-label="Account" hidden>
+              <span class="eyebrow">SIGNED IN AS</span><strong id="account-email"></strong>
+              <button type="button" id="briefing-open-btn" class="menu-action">
+                Morning briefing settings
+              </button>
+              <button type="button" id="account-signout" class="menu-action danger">
+                Sign out
+              </button>
+            </div>
             <span id="auth-error" class="auth-status auth-error" role="alert" hidden></span>
           </div>
           <span id="sync-status" class="auth-status" role="status" hidden></span>
+          <span id="local-status" class="auth-status local-status" hidden>Local only</span>
           <details id="browser-menu" hidden>
             <summary aria-label="App menu">•••</summary>
             <div class="menu-items">
               <button id="export-pdf-btn">Export PDF report</button
               ><button id="export-json-btn">Export JSON backup</button
+              ><button id="export-full-btn">Export full backup</button
+              ><button id="import-full-btn">Import full backup</button
               ><button id="import-btn">Import JSON</button>
             </div>
           </details>
@@ -49,7 +68,13 @@
         <div id="tabs">
           <button class="tab active" data-view="today" aria-pressed="true">
             Today <span id="today-count">0</span></button
-          ><button class="tab" data-view="all" aria-pressed="false">All</button>
+          ><button class="tab" data-view="all" aria-pressed="false">All</button> ><button
+            class="tab"
+            data-view="recovery"
+            aria-pressed="false"
+          >
+            Recovery
+          </button>
         </div>
         <div id="all-controls" hidden>
           <input
@@ -101,6 +126,8 @@
             <div id="detail-date"></div>
             <div id="detail-log"></div>
             <div id="detail-log-compose"></div>
+            <div id="detail-history"></div>
+            <div id="detail-attachments"></div>
           </section>
           <form id="form-panel" hidden>
             <h2 id="form-label">New project</h2>
@@ -199,6 +226,111 @@
     </div>
 
     <div
+      id="briefing-overlay"
+      hidden
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="briefing-title"
+    >
+      <div id="briefing-panel">
+        <div id="briefing-title">◈ MORNING BRIEFING</div>
+        <p class="panel-copy">
+          An optional weekday email listing projects due today or overdue. It uses your signed-in,
+          verified email and stays off until you enable it.
+        </p>
+        <form id="briefing-form">
+          <label for="briefing-time">TIME</label
+          ><input id="briefing-time" type="time" value="08:00" required />
+          <label for="briefing-timezone">TIMEZONE</label
+          ><input id="briefing-timezone" type="text" required />
+          <fieldset id="briefing-days">
+            <legend>WEEKDAYS</legend>
+            <label><input type="checkbox" value="mon" checked /> Mon</label
+            ><label><input type="checkbox" value="tue" checked /> Tue</label
+            ><label><input type="checkbox" value="wed" checked /> Wed</label
+            ><label><input type="checkbox" value="thu" checked /> Thu</label
+            ><label><input type="checkbox" value="fri" checked /> Fri</label
+            ><label><input type="checkbox" value="sat" /> Sat</label
+            ><label><input type="checkbox" value="sun" /> Sun</label>
+          </fieldset>
+          <label class="toggle-row"
+            ><input id="briefing-enabled" type="checkbox" /> Enable morning briefing</label
+          >
+          <div id="briefing-preview" class="briefing-preview" aria-live="polite"></div>
+          <div id="briefing-delivery-status" class="briefing-status" aria-live="polite"></div>
+          <div id="briefing-cloud-status" class="briefing-status" aria-live="polite"></div>
+          <span id="briefing-error" class="auth-status auth-error" role="alert" hidden></span>
+          <div class="panel-actions">
+            <button type="button" id="briefing-close" class="form-act">CANCEL</button
+            ><button type="button" id="briefing-refresh" class="form-act">PREVIEW</button
+            ><button type="button" id="briefing-test" class="form-act">SEND TEST EMAIL</button
+            ><button type="submit" class="form-act primary">SAVE</button>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    <div
+      id="welcome-overlay"
+      hidden
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="welcome-title"
+    >
+      <div id="welcome-panel">
+        <div id="welcome-title">◈ WELCOME TO WORK RADAR</div>
+        <p class="panel-copy">
+          Keep your projects in view, remember what you are waiting on, and know what needs your
+          attention today.
+        </p>
+        <p class="panel-copy">
+          Sign in is for invited users with an existing account. It enables syncing and optional
+          morning emails. You can also keep everything on this device.
+        </p>
+        <form id="welcome-signin-form" hidden>
+          <label for="welcome-email">INVITED ACCOUNT EMAIL</label
+          ><input id="welcome-email" type="email" autocomplete="email" required /><span
+            id="welcome-signin-status"
+            class="auth-status"
+            role="status"
+          ></span>
+          <div class="panel-actions">
+            <button type="button" id="welcome-back" class="form-act">BACK</button
+            ><button type="submit" class="form-act primary">SEND SIGN-IN LINK</button>
+          </div>
+        </form>
+        <div id="welcome-start-actions" class="panel-actions">
+          <button type="button" id="welcome-signin" class="form-act primary">SIGN IN</button
+          ><button type="button" id="welcome-local" class="form-act">
+            CONTINUE WITHOUT AN ACCOUNT
+          </button>
+        </div>
+        <div id="welcome-final-actions" class="panel-actions" hidden>
+          <button type="button" id="welcome-create" class="form-act primary">
+            CREATE FIRST PROJECT</button
+          ><button type="button" id="welcome-import" class="form-act">IMPORT A BACKUP</button
+          ><button type="button" id="welcome-dismiss" class="form-act">
+            START USING WORK RADAR
+          </button>
+        </div>
+        <div id="welcome-association" hidden>
+          <p class="panel-copy">
+            This device already has local projects. Choose whether to associate them with the
+            signed-in account before syncing.
+          </p>
+          <div class="panel-actions">
+            <button type="button" id="welcome-associate" class="form-act primary">
+              ASSOCIATE THIS PROFILE</button
+            ><button type="button" id="welcome-keep-local" class="form-act">
+              USE SEPARATE ACCOUNT PROFILE
+            </button>
+          </div>
+          <span id="welcome-association-status" class="auth-status" role="status"></span>
+        </div>
+      </div>
+    </div>
+
+    <div
       id="sync-key-overlay"
       hidden
       role="dialog"
@@ -229,6 +361,8 @@
     </div>
     <script src="domain.js"></script>
     <script src="auth-view.js"></script>
+    <script src="onboarding-view.js"></script>
+    <script src="briefing-view.js"></script>
     <script src="sync-view.js"></script>
     <script src="app.js"></script>
   </body>

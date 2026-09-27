@@ -39,6 +39,8 @@
       "main.js",
       "preload.js",
       "logger.js",
+      "briefing.js",
+      "onboarding-store.js",
       "sync/**/*",
       "renderer/**/*",
       "build/icon.png",

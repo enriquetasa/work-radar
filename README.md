@@ -62,8 +62,7 @@ Unlike the old single-file HTML version, this does **not** depend on browser sto
 
 Work Radar is **local-first**: the JSON file described above is always the
 source of truth, and the app works fully offline with zero setup. Sync is an
-entirely optional layer on top — if it isn't configured, no sign-in UI is
-shown at all and nothing changes about how the app behaves.
+entirely optional layer on top. A fresh installation opens a welcome flow where you can sign in with an existing invited account or continue without an account; the local-only choice is saved on this device.
 
 When configured, sync lets the same data follow you between machines:
 
@@ -254,6 +253,18 @@ pointing sync at real data, check with security/IT — they may prefer a
 company-owned Supabase organization over a personal one. Until that
 sign-off happens, develop and test against the local Supabase stack with
 fake data only.
+
+## First launch, profiles, and recovery features
+
+The first launch welcome explains the local-only path and the invited-user magic-link path. Work Radar never creates accounts or accepts a recipient email for briefings. A local-only choice remains available later through the account panel, and **Radar → Open Introduction** reopens the welcome text.
+
+The signed-in email stays visible beside Synced, Pending, Offline, and Sync error. Each account uses an isolated local profile under the app data directory. If a device already has local projects, Work Radar asks before associating them with an account; it does not silently upload or merge them into another account.
+
+Every project edit is retained as bounded recovery history (newest 100 versions per project). Open a project to compare a saved version with the current fields or restore it as a new edit. Activity notes and attachments remain separate from project snapshots. Attachments are copied into app-managed private storage when added, checked against the 10 MB type/size policy, and expose pending, uploading, available, failed, and offline states in the inspector. The desktop app opens files through the operating system after an explicit action.
+
+Morning briefings are opt-in. Signed-in users can open the account panel to choose an IANA timezone, local time, weekdays, preview the deterministic due-project list, and send a test email. Delivery requires the protected Supabase Edge Function and a configured provider; applying the local migration alone does not enable sending. The function derives the recipient from the verified account email and skips empty briefings. See [the implementation plan](docs/history-attachments-briefing-plan.md), [briefing operations](docs/morning-briefing-operations.md), and [distribution setup](docs/distribution.md) for deployment configuration and rollback guidance.
+
+JSON backups preserve history and attachment metadata. The desktop menu can export and import full Work Radar archives with project data, history, attachment metadata, and checksum-verified attachment bytes; unavailable attachment bytes are reported rather than silently omitted.
 
 ## Migrating from the browser version
 

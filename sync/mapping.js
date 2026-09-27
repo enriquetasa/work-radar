@@ -15,6 +15,7 @@
    ============================================================ */
 
 const { normalizeSchedule } = require('../renderer/domain.js');
+const history = require('./history.js');
 
 // undefined/null/0-that-means-"unset" all round-trip through here as
 // null: domain.js items use `undefined` for an unset archivedAt/deletedAt
@@ -98,6 +99,25 @@ function rowToLogEntry(row) {
   return { id: row.id, ts: isoToMs(row.ts), text: row.text || '' };
 }
 
+// History rows are kept independent of the coalesced item outbox. A revision
+// carries an immutable JSON snapshot and can be retried safely by id.
+function revisionToPushRow(revision) {
+  return {
+    id: revision.id,
+    itemId: revision.itemId,
+    snapshotSchema: revision.snapshotSchema || 1,
+    snapshot: revision.snapshot,
+    action: revision.action || 'edit',
+    sourceDevice: revision.sourceDevice || null,
+    clientTime: msToIso(revision.clientTime),
+    restoredFromRevisionId: revision.restoredFromRevisionId || null,
+  };
+}
+
+function rowToRevision(row) {
+  return history.fromRow(row);
+}
+
 module.exports = {
   msToIso,
   isoToMs,
@@ -105,4 +125,6 @@ module.exports = {
   logEntryToPushRow,
   rowToItem,
   rowToLogEntry,
+  revisionToPushRow,
+  rowToRevision,
 };

@@ -32,7 +32,7 @@ const Persist = {
         console.error('radar save failed', res && res.error);
         alert('SAVE FAILED — export a backup now.');
       }
-      return;
+      return res;
     }
     try {
       localStorage.setItem('workradar', JSON.stringify(obj));
@@ -48,6 +48,10 @@ const Store = {
   items: [],
   arch: [],
   lastExport: 0,
+  itemRevisions: [],
+  attachments: [],
+  attachmentRecords: [],
+  profileId: null,
   ui: {
     view: 'today',
     filter: 'all',
@@ -76,6 +80,9 @@ const Store = {
       }
       return;
     }
+    if (Number.isFinite(Number(d.schema)) && Number(d.schema) > D.SCHEMA) {
+      throw new Error('This data file was created by a newer version of Work Radar.');
+    }
     // Merge against an empty state so any id that ended up in both items
     // and arch (possible under the old mergeById import, which this
     // replaces) collapses to one record instead of showing up twice.
@@ -89,6 +96,10 @@ const Store = {
     this.items = deduped.items;
     this.arch = deduped.arch;
     this.lastExport = d.lastExport || 0;
+    this.itemRevisions = Array.isArray(d.itemRevisions) ? d.itemRevisions : [];
+    this.attachments = Array.isArray(d.attachments) ? d.attachments : [];
+    this.attachmentRecords = Array.isArray(d.attachmentRecords) ? d.attachmentRecords : [];
+    this.profileId = d.profileId || null;
   },
   serialize() {
     return D.serialize(this);
@@ -96,21 +107,72 @@ const Store = {
 };
 
 /* ---------- Debounced save ---------- */
-let saveTimer = null;
+let saveQueue = Promise.resolve();
+let saveGeneration = 0;
+function invalidatePendingSaves() {
+  saveGeneration += 1;
+  pendingSaveOptions = {};
+}
 // Set when Store.load() fails at boot (see boot() below). Store.items/arch
 // then stay at their empty initial value, so saving would overwrite the
 // user's real data file with nothing; refuse until the app is restarted.
 let loadFailed = false;
+let pendingSaveOptions = {};
+function mergeSavedMetadata(data) {
+  if (!data) return;
+  const merge = (current, incoming) => {
+    const rows = [
+      ...(Array.isArray(current) ? current : []),
+      ...(Array.isArray(incoming) ? incoming : []),
+    ];
+    return [...new Map(rows.filter((row) => row && row.id).map((row) => [row.id, row])).values()];
+  };
+  Store.itemRevisions = merge(Store.itemRevisions, data.itemRevisions);
+  Store.attachments = merge(Store.attachments, data.attachments);
+  Store.attachmentRecords = merge(Store.attachmentRecords, data.attachmentRecords);
+}
 function scheduleSave() {
   if (loadFailed) {
     console.error('save skipped: Store.load() failed at boot, refusing to overwrite data file');
     return;
   }
-  clearTimeout(saveTimer);
-  saveTimer = setTimeout(() => Persist.save(Store.serialize()), 120);
+  const payload = Store.serialize();
+  Object.assign(payload, pendingSaveOptions);
+  pendingSaveOptions = {};
+  const generation = saveGeneration;
+  saveQueue = saveQueue
+    .then(async () => {
+      if (generation !== saveGeneration) return;
+      const result = await Persist.save(payload);
+      if (generation !== saveGeneration) return;
+      if (result && result.data) {
+        mergeSavedMetadata(result.data);
+        render();
+      }
+    })
+    .catch((err) => console.error('queued save failed', err));
 }
-function commit() {
+
+function commit(options = {}) {
+  pendingSaveOptions = { ...pendingSaveOptions, ...options };
   scheduleSave();
+  render();
+}
+function clearRendererProfile() {
+  Store.items = [];
+  Store.arch = [];
+  Store.itemRevisions = [];
+  Store.attachments = [];
+  Store.attachmentRecords = [];
+  Store.profileId = null;
+  Store.ui.sel = null;
+  Store.ui.search = '';
+  Store.ui.showForm = false;
+  Store.ui.editId = null;
+}
+async function reloadRendererProfile() {
+  clearRendererProfile();
+  await Store.load();
   render();
 }
 
@@ -119,11 +181,11 @@ const Actions = {
   // Keep timestamp rules in the tested domain layer.
   add(v) {
     Store.items.push(D.createItem(v, Date.now(), uid));
-    commit();
+    commit({ historyAction: 'create' });
   },
   update(id, v) {
     Store.items = Store.items.map((i) => (i.id === id ? D.updateItem(i, v, Date.now()) : i));
-    commit();
+    commit({ historyAction: 'edit' });
   },
   // Every mutation below goes through a pure domain.js function so the
   // updatedAt bump (and, for purge, the tombstone) is unit-tested rather
@@ -132,11 +194,11 @@ const Actions = {
   review(id, nextDate) {
     const now = Date.now();
     Store.items = Store.items.map((i) => (i.id === id ? D.reviewItem(i, now, nextDate) : i));
-    commit();
+    commit({ historyAction: 'review' });
   },
   snooze(id, date) {
     Store.items = Store.items.map((i) => (i.id === id ? D.snoozeItem(i, date, Date.now()) : i));
-    commit();
+    commit({ historyAction: 'snooze' });
   },
   archive(id) {
     const it = Store.items.find((i) => i.id === id);
@@ -145,7 +207,7 @@ const Actions = {
     Store.arch.unshift(D.archiveItem(it, now));
     Store.items = Store.items.filter((i) => i.id !== id);
     if (Store.ui.sel === id) Store.ui.sel = null;
-    commit();
+    commit({ historyAction: 'archive' });
   },
   restore(id) {
     const it = Store.arch.find((i) => i.id === id);
@@ -153,7 +215,7 @@ const Actions = {
     const now = Date.now();
     Store.items.push(D.restoreItem(it, now));
     Store.arch = Store.arch.filter((i) => i.id !== id);
-    commit();
+    commit({ historyAction: 'restore' });
   },
   // PURGE never removes the record — it marks it a tombstone (deletedAt).
   // Tombstones stay in the data file (so a later merge still sees the
@@ -163,15 +225,40 @@ const Actions = {
     const now = Date.now();
     Store.arch = Store.arch.map((i) => (i.id === id ? D.purgeItem(i, now) : i));
     if (Store.ui.sel === id) Store.ui.sel = null;
-    commit();
+    if (HAS_API && window.radarAPI.attachmentsRemoveForItem)
+      window.radarAPI
+        .attachmentsRemoveForItem(id)
+        .catch((err) => console.error('attachment purge failed', err));
+    commit({ historyAction: 'purge' });
   },
   addLogEntry(id, text) {
     const now = Date.now();
     Store.items = Store.items.map((i) => (i.id === id ? D.addLogEntry(i, text, now, uid) : i));
-    commit();
+    commit({ historyAction: 'log' });
+  },
+  restoreRevision(itemId, revision) {
+    const current = [...Store.items, ...Store.arch].find((item) => item.id === itemId);
+    if (!revision || !revision.snapshot) return false;
+    const snapshot = JSON.parse(JSON.stringify(revision.snapshot));
+    const base = current || { ...snapshot, id: itemId, log: [] };
+    const restored = {
+      ...base,
+      ...snapshot,
+      id: itemId,
+      archivedAt: snapshot.archivedAt || undefined,
+      deletedAt: snapshot.deletedAt || undefined,
+      log: base.log || [],
+      updatedAt: Math.max(Date.now(), (base.updatedAt || 0) + 1),
+    };
+    Store.items = Store.items.filter((item) => item.id !== itemId);
+    Store.arch = Store.arch.filter((item) => item.id !== itemId);
+    (restored.archivedAt ? Store.arch : Store.items).push(restored);
+    commit({ historyAction: 'restore', restoredFromRevisionId: revision.id });
+    return true;
   },
 
   async exportJSON() {
+    await saveQueue;
     const data = Store.serialize();
     if (HAS_API) {
       const res = await window.radarAPI.export(data);
@@ -191,6 +278,25 @@ const Actions = {
     }
   },
 
+  async exportFull() {
+    if (!HAS_API || !window.radarAPI.exportFull) return this.exportJSON();
+    await saveQueue;
+    const result = await window.radarAPI.exportFull(Store.serialize());
+    if (!result || !result.ok)
+      alert('FULL BACKUP FAILED — ' + ((result && result.error) || 'cancelled'));
+  },
+
+  async importFull() {
+    if (!HAS_API || !window.radarAPI.importFull) return;
+    const data = await window.radarAPI.importFull();
+    if (!data) return;
+    if (data.error) {
+      alert('FULL BACKUP FAILED — ' + data.error);
+      return;
+    }
+    return this.mergeImported(data, { skipConfirm: data.__fullImportConfirmed === true });
+  },
+
   async exportPDF() {
     const html = D.buildReportHTML(Store.items);
     if (HAS_API) {
@@ -207,12 +313,16 @@ const Actions = {
     }
   },
 
-  mergeImported(d) {
+  mergeImported(d, { skipConfirm = false } = {}) {
+    if (Number.isFinite(Number(d && d.schema)) && Number(d.schema) > D.SCHEMA) {
+      alert('IMPORT FAILED — this backup was created by a newer version of Work Radar.');
+      return false;
+    }
     const inItems = D.migrate(Array.isArray(d.items) ? d.items : []);
     const inArch = D.migrate(Array.isArray(d.arch) ? d.arch : []);
     if (!inItems.length && !inArch.length) {
       alert('NO CONTACTS FOUND IN FILE.');
-      return;
+      return false;
     }
     // Count live/archived contacts, not tombstones — a file holding only
     // purged records should say "0 archived", not count them as archived
@@ -221,6 +331,7 @@ const Actions = {
     const archCount = D.stripTombstones(inArch).length;
     const deletions = inItems.length - liveCount + (inArch.length - archCount);
     if (
+      !skipConfirm &&
       !confirm(
         'MERGE ' +
           liveCount +
@@ -233,23 +344,35 @@ const Actions = {
           '?\nFor matching IDs, the most recently edited version wins.'
       )
     )
-      return;
+      return false;
     const merged = D.mergeState(
       { items: Store.items, arch: Store.arch },
       { items: inItems, arch: inArch }
     );
     Store.items = merged.items;
     Store.arch = merged.arch;
+    const mergeById = (left, right) => {
+      const out = new Map(
+        [...(Array.isArray(left) ? left : []), ...(Array.isArray(right) ? right : [])]
+          .filter((row) => row && row.id)
+          .map((row) => [row.id, row])
+      );
+      return [...out.values()];
+    };
+    Store.itemRevisions = mergeById(Store.itemRevisions, d.itemRevisions);
+    Store.attachments = mergeById(Store.attachments, d.attachments);
+    Store.attachmentRecords = mergeById(Store.attachmentRecords, d.attachmentRecords);
     Store.ui.sel = null;
-    commit();
+    commit({ historyAction: 'import' });
+    return true;
   },
 
   async importJSON() {
     if (HAS_API) {
       const d = await window.radarAPI.import();
-      if (!d) return;
+      if (!d) return false;
       try {
-        this.mergeImported(d);
+        return this.mergeImported(d);
       } catch (err) {
         console.error('import merge failed', err);
         alert('IMPORT FAILED — the file merged with unexpected data. See console for details.');
@@ -270,8 +393,9 @@ const Actions = {
    Radar menu, not here (main.js only adds that menu item when sync is
    configured). */
 const Auth = {
-  // init() can run again after an in-process key save; bind listeners once.
   _listenersBound: false,
+  lastSignedIn: false,
+  status: { configured: false, signedIn: false, pending: false },
   async init() {
     if (!HAS_API || !window.radarAPI.authStatus) return;
     let status;
@@ -281,30 +405,90 @@ const Auth = {
       console.error('authStatus failed', err);
       return;
     }
-    if (!status || !status.configured) return; // sync not configured — leave the panel hidden
+    this.status = status || { configured: false, signedIn: false, pending: false };
     document.getElementById('auth-panel').hidden = false;
-    this.render(status);
+    this.render(this.status);
     if (this._listenersBound) return;
     this._listenersBound = true;
-    if (window.radarAPI.onAuthStateChanged) {
-      window.radarAPI.onAuthStateChanged((s) => this.render(s));
-    }
+    if (window.radarAPI.onAuthStateChanged)
+      window.radarAPI.onAuthStateChanged((next) => {
+        const previous = this.status || {};
+        this.lastSignedIn = Boolean(previous.signedIn || previous.userId);
+        this.status = next
+          ? { ...next, configured: next.configured ?? previous.configured ?? false }
+          : { configured: previous.configured ?? false, signedIn: false, pending: false };
+        this.render(this.status);
+        const accountChanged = previous.userId && previous.userId !== this.status.userId;
+        if (!this.status.signedIn || this.status.profileRequired || accountChanged) {
+          invalidatePendingSaves();
+          clearRendererProfile();
+          render();
+        }
+        if (this.status.signedIn) {
+          if (this.status.profileRequired) Onboarding.requireAssociation();
+          else {
+            window.radarAPI
+              .onboardingMarkSignedIn?.()
+              .catch((err) => console.error('onboarding update failed', err));
+            Onboarding.finish();
+            reloadRendererProfile().catch((err) =>
+              console.error('profile reload after sign-in failed', err)
+            );
+          }
+        } else {
+          Onboarding.finish();
+          reloadRendererProfile().catch((err) =>
+            console.error('profile reload after sign-out failed', err)
+          );
+        }
+      });
     document.getElementById('auth-form').addEventListener('submit', (e) => {
       e.preventDefault();
       this.submit();
     });
+    document.getElementById('account-signout').addEventListener('click', () => this.signOut());
+    document.getElementById('auth-signed-in').addEventListener('click', () => Account.toggle());
+    document.getElementById('briefing-open-btn').addEventListener('click', () => {
+      Account.close();
+      Briefing.open();
+    });
   },
   render(status) {
-    // The view/clear-error decision is pure — see renderer/auth-view.js
-    // for why only the signedIn and pending branches clear #auth-error.
-    const view = AV.computeAuthView(status);
-    if (view.clearError) document.getElementById('auth-error').hidden = true;
-    document.getElementById('auth-form').hidden = !view.form;
+    this.status = status || { configured: false, signedIn: false, pending: false };
+    const view = AV.computeAuthView(this.status);
+    const form = document.getElementById('auth-form');
+    const signedIn = document.getElementById('auth-signed-in');
+    document.getElementById('auth-error').hidden = view.clearError
+      ? true
+      : document.getElementById('auth-error').hidden;
+    form.hidden = !view.form;
     document.getElementById('auth-pending').hidden = !view.pending;
-    document.getElementById('auth-signed-in').hidden = !view.signedIn;
+    signedIn.hidden = !view.signedIn;
+    const local = document.getElementById('local-status');
+    local.hidden = !!this.status.signedIn;
+    if (!this.status.configured) {
+      form.hidden = true;
+      document.getElementById('auth-pending').hidden = true;
+      signedIn.hidden = true;
+      return;
+    }
     if (view.signedIn) {
-      document.getElementById('auth-email-label').textContent = 'Cloud connected';
-      document.getElementById('auth-signed-in').title = status.email || '';
+      const email = this.status.email || '';
+      document.getElementById('auth-email-label').textContent = email;
+      document.getElementById('account-email').textContent = email;
+      signedIn.title = email;
+    } else if (this.status.configured) {
+      const localOnly = Onboarding.state?.mode === 'local';
+      const retry =
+        !localOnly &&
+        (this.lastSignedIn || Onboarding.state?.mode === 'account' || this.status.expired === true);
+      const label = retry ? 'Sign in again' : 'Sign in';
+      document.getElementById('auth-email-label').textContent = label;
+      document.getElementById('account-email').textContent = '';
+      document.getElementById('auth-submit').textContent = label;
+      document.getElementById('auth-email').placeholder = retry
+        ? 'Sign in again to sync'
+        : 'Email for sync';
     }
   },
   showError(message) {
@@ -322,27 +506,390 @@ const Auth = {
       input.focus();
       return;
     }
-    // Optimistic: main won't resolve authSignIn until the whole
-    // magic-link round trip finishes (or fails/times out), so flip to
-    // "check your inbox" right away rather than waiting on it.
     document.getElementById('auth-form').hidden = true;
     document.getElementById('auth-error').hidden = true;
     document.getElementById('auth-pending').hidden = false;
     try {
       const res = await window.radarAPI.authSignIn(email);
-      if (!res || !res.ok) {
-        console.error('sign-in failed', res && res.error);
-        this.showError((res && res.error) || 'SIGN-IN FAILED');
-      }
-      // On success, the 'auth:stateChanged' push already re-rendered as
-      // signed-in — nothing else to do here.
+      if (!res || !res.ok) this.showError((res && res.error) || 'SIGN-IN FAILED');
     } catch (err) {
       console.error('sign-in failed', err);
       this.showError('SIGN-IN FAILED');
     }
   },
+  async signOut() {
+    Account.close();
+    invalidatePendingSaves();
+    clearRendererProfile();
+    render();
+    try {
+      await window.radarAPI.authSignOut();
+    } catch (err) {
+      console.error('sign-out failed', err);
+    }
+  },
 };
 
+const Account = {
+  toggle() {
+    const menu = document.getElementById('account-menu');
+    const button = document.getElementById('auth-signed-in');
+    menu.hidden = !menu.hidden;
+    button.setAttribute('aria-expanded', String(!menu.hidden));
+  },
+  close() {
+    const menu = document.getElementById('account-menu');
+    if (menu) menu.hidden = true;
+    const button = document.getElementById('auth-signed-in');
+    if (button) button.setAttribute('aria-expanded', 'false');
+  },
+};
+
+const Onboarding = {
+  state: null,
+  step: 'welcome',
+  async init() {
+    const overlay = document.getElementById('welcome-overlay');
+    if (!overlay) return;
+    let state = null;
+    if (HAS_API && window.radarAPI.onboardingGet) {
+      try {
+        state = await window.radarAPI.onboardingGet();
+      } catch (err) {
+        console.error('onboarding load failed', err);
+      }
+    } else {
+      try {
+        state = JSON.parse(localStorage.getItem('workradar-onboarding') || 'null');
+      } catch {
+        state = null;
+      }
+    }
+    this.state = state || { status: 'new', step: 'welcome' };
+    Auth.render(Auth.status);
+    if (
+      !WorkRadarOnboardingView.shouldShow(
+        this.state,
+        Store.items.length > 0 || Store.arch.length > 0 || Store.itemRevisions.length > 0,
+        Auth.status.signedIn
+      )
+    )
+      return;
+    overlay.hidden = false;
+    document.getElementById('app').inert = true;
+    document.getElementById('welcome-local').onclick = () => this.chooseLocal();
+    document.getElementById('welcome-import').onclick = () => this.importBackup();
+    document.getElementById('welcome-signin').hidden = !Auth.status.configured;
+    document.getElementById('welcome-signin').onclick = () => this.showSignIn();
+    document.getElementById('welcome-back').onclick = () => this.showWelcome();
+    document.getElementById('welcome-signin-form').onsubmit = (e) => {
+      e.preventDefault();
+      this.submitSignIn();
+    };
+    document.getElementById('welcome-create').onclick = () => {
+      this.finish();
+      openAdd();
+    };
+    document.getElementById('welcome-dismiss').onclick = () => this.finish();
+    document.getElementById('welcome-associate').onclick = () => this.associate(false);
+    document.getElementById('welcome-keep-local').onclick = () => this.associate(true);
+    if (this.state.step === 'signin' && this.state.status === 'in_progress') this.showSignIn();
+    else this.showWelcome();
+  },
+  async persist(patch) {
+    this.state = { ...this.state, ...patch };
+    if (HAS_API && window.radarAPI.onboardingUpdate) await window.radarAPI.onboardingUpdate(patch);
+    else localStorage.setItem('workradar-onboarding', JSON.stringify(this.state));
+  },
+  showSignIn() {
+    this.step = 'signin';
+    document.getElementById('welcome-start-actions').hidden = true;
+    document.getElementById('welcome-final-actions').hidden = true;
+    document.getElementById('welcome-signin-form').hidden = false;
+    document.getElementById('welcome-title').textContent = WorkRadarOnboardingView.title('signin');
+    document.getElementById('welcome-email').focus();
+    this.persist({ status: 'in_progress', step: 'signin' }).catch((err) =>
+      console.error('onboarding save failed', err)
+    );
+  },
+  showWelcome() {
+    this.step = 'welcome';
+    document.getElementById('welcome-start-actions').hidden = false;
+    document.getElementById('welcome-final-actions').hidden = true;
+    document.getElementById('welcome-signin-form').hidden = true;
+    document.getElementById('welcome-association').hidden = true;
+    document.getElementById('welcome-title').textContent = WorkRadarOnboardingView.title('welcome');
+    document.getElementById('welcome-local').focus();
+  },
+  async submitSignIn() {
+    const email = document.getElementById('welcome-email').value.trim();
+    const status = document.getElementById('welcome-signin-status');
+    if (!email) {
+      document.getElementById('welcome-email').focus();
+      return;
+    }
+    if (!Auth.status.configured) {
+      status.textContent = 'Cloud sign-in is unavailable in this build. Continue locally.';
+      return;
+    }
+    status.textContent = 'Sending sign-in link…';
+    const res = await window.radarAPI.authSignIn(email);
+    if (!res || !res.ok) {
+      status.textContent = (res && res.error) || 'Sign-in failed. You can continue locally.';
+      return;
+    }
+    status.textContent =
+      'Check your inbox. Keep Work Radar running while you open the link on this computer.';
+  },
+  async importBackup() {
+    const imported =
+      HAS_API && window.radarAPI.importFull
+        ? await Actions.importFull()
+        : await Actions.importJSON();
+    if (imported) this.finish();
+  },
+  async chooseLocal() {
+    if (HAS_API && window.radarAPI.onboardingChooseLocal)
+      await window.radarAPI.onboardingChooseLocal();
+    else
+      await this.persist({
+        status: 'complete',
+        step: 'done',
+        mode: 'local',
+        completedAt: Date.now(),
+      });
+    this.state = { ...this.state, status: 'complete', step: 'done', mode: 'local' };
+    this.showFinal();
+  },
+  requireAssociation() {
+    const overlay = document.getElementById('welcome-overlay');
+    if (!overlay) return;
+    overlay.hidden = false;
+    document.getElementById('app').inert = true;
+    document.getElementById('welcome-start-actions').hidden = true;
+    document.getElementById('welcome-signin-form').hidden = true;
+    document.getElementById('welcome-final-actions').hidden = true;
+    document.getElementById('welcome-association').hidden = false;
+    document.getElementById('welcome-title').textContent = 'ASSOCIATE LOCAL PROJECTS';
+    document.getElementById('welcome-associate').focus();
+  },
+  async associate(separate = false) {
+    const status = document.getElementById('welcome-association-status');
+    const result = separate
+      ? await window.radarAPI.profileUseSeparate()
+      : await window.radarAPI.profileAssociate();
+    if (!result || !result.ok) {
+      status.textContent = (result && result.error) || 'Could not associate this profile';
+      return;
+    }
+    document.getElementById('welcome-association').hidden = true;
+    await window.radarAPI.onboardingMarkSignedIn();
+    this.finish();
+  },
+  showFinal() {
+    document.getElementById('welcome-association').hidden = true;
+    document.getElementById('welcome-start-actions').hidden = true;
+    document.getElementById('welcome-signin-form').hidden = true;
+    document.getElementById('welcome-final-actions').hidden = false;
+    document.getElementById('welcome-title').textContent = 'READY WHEN YOU ARE';
+    document.getElementById('welcome-create').focus();
+  },
+  reopen() {
+    const overlay = document.getElementById('welcome-overlay');
+    if (!overlay) return;
+    this.showWelcome();
+    overlay.hidden = false;
+    document.getElementById('app').inert = true;
+  },
+  finish() {
+    document.getElementById('welcome-overlay').hidden = true;
+    document.getElementById('app').inert = false;
+  },
+};
+
+const Briefing = {
+  preferences: null,
+  signedIn: false,
+  async open() {
+    const overlay = document.getElementById('briefing-overlay');
+    if (!overlay) return;
+    overlay.hidden = false;
+    document.getElementById('app').inert = true;
+    const response =
+      HAS_API && window.radarAPI.briefingPreferences
+        ? await window.radarAPI.briefingPreferences()
+        : {
+            preferences: {
+              enabled: false,
+              time: '08:00',
+              timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+              weekdays: ['mon', 'tue', 'wed', 'thu', 'fri'],
+            },
+            signedIn: false,
+          };
+    const prefs = response?.preferences || response;
+    this.preferences = prefs;
+    this.signedIn = response?.signedIn === true;
+    document.getElementById('briefing-test').disabled = !this.signedIn;
+    this.renderCloudStatus(response);
+    this.renderDeliveryStatus(response);
+    this.fill(prefs);
+    await this.preview();
+  },
+  close() {
+    document.getElementById('briefing-overlay').hidden = true;
+    document.getElementById('app').inert = false;
+  },
+  fill(prefs) {
+    document.getElementById('briefing-enabled').checked = prefs.enabled === true;
+    document.getElementById('briefing-time').value = prefs.time || '08:00';
+    document.getElementById('briefing-timezone').value =
+      prefs.timezone || Intl.DateTimeFormat().resolvedOptions().timeZone;
+    document.querySelectorAll('#briefing-days input').forEach((input) => {
+      input.checked = prefs.weekdays.includes(input.value);
+    });
+  },
+  values() {
+    return {
+      enabled: document.getElementById('briefing-enabled').checked,
+      time: document.getElementById('briefing-time').value,
+      timezone: document.getElementById('briefing-timezone').value.trim(),
+      weekdays: [...document.querySelectorAll('#briefing-days input:checked')].map(
+        (input) => input.value
+      ),
+    };
+  },
+  showError(message) {
+    const error = document.getElementById('briefing-error');
+    error.textContent = message || '';
+    error.hidden = !message;
+  },
+  renderCloudStatus(response = {}) {
+    const cloud = document.getElementById('briefing-cloud-status');
+    if (!response.signedIn) {
+      cloud.textContent = 'Sign in with a verified email to send a test briefing.';
+      return;
+    }
+    cloud.textContent = response.cloudError || 'Cloud briefing settings are connected.';
+  },
+  deliveryLabel(delivery, label) {
+    if (!delivery) return '';
+    const prefix = label ? label + ': ' : '';
+    if (delivery.state === 'sent') return prefix + 'Sent';
+    if (delivery.state === 'skipped') {
+      const reason = {
+        empty: 'nothing due',
+        disabled: 'briefing disabled',
+        unverified_email: 'verified email unavailable',
+      }[delivery.reason];
+      return prefix + 'Skipped' + (reason ? ' — ' + reason : '');
+    }
+    if (delivery.state === 'failed')
+      return prefix + 'Failed' + (delivery.error ? ' — ' + delivery.error : '');
+    return prefix + (delivery.state || 'Pending');
+  },
+  renderDeliveryStatus(response = {}) {
+    const status = document.getElementById('briefing-delivery-status');
+    const values = [
+      this.deliveryLabel(response.latestTest, 'Latest test'),
+      this.deliveryLabel(response.latestDelivery, 'Latest scheduled delivery'),
+    ].filter(Boolean);
+    status.textContent = values.join(' · ');
+  },
+  async preview() {
+    const preview = document.getElementById('briefing-preview');
+    this.showError('');
+    if (!HAS_API || !window.radarAPI.briefingPreview) {
+      preview.textContent = 'Preview is available in the desktop app.';
+      return;
+    }
+    try {
+      const result = await window.radarAPI.briefingPreview({ preferences: this.values() });
+      if (!result || !result.ok || !result.briefing) {
+        preview.textContent = 'Preview unavailable.';
+        this.showError((result && result.error) || 'Could not load briefing preview');
+        return;
+      }
+      const view = WorkRadarBriefingView.formatPreview(result.briefing);
+      preview.replaceChildren();
+      preview.append(node('strong', '', view.heading));
+      view.rows.forEach((row) => {
+        const line = node(
+          'p',
+          '',
+          row.name + ' — ' + row.reason + (row.waitingOn ? ' · Waiting on ' + row.waitingOn : '')
+        );
+        preview.append(line);
+      });
+      preview.append(
+        node(
+          'small',
+          '',
+          'Preview uses this device’s saved projects; cloud email uses synced projects. Timezone: ' +
+            result.briefing.timezone
+        )
+      );
+    } catch (err) {
+      preview.textContent = 'Preview unavailable.';
+      this.showError('Could not load briefing preview');
+      console.error('briefing preview failed', err);
+    }
+  },
+  async save(event, { close = true } = {}) {
+    event?.preventDefault();
+    const result = await window.radarAPI.briefingSetPreferences(this.values());
+    if (!result || !result.ok) {
+      this.showError((result && result.error) || 'Could not save briefing settings');
+      return result;
+    }
+    this.signedIn = result.signedIn === true;
+    this.renderCloudStatus(result);
+    if (this.signedIn && !result.cloudSynced) {
+      this.showError(
+        result.cloudError || 'Settings were saved locally but not synced to your account.'
+      );
+      return result;
+    }
+    this.showError('');
+    if (close) this.close();
+    return result;
+  },
+  async testSend() {
+    const saved = await this.save(null, { close: false });
+    if (!saved || !saved.ok || (saved.signedIn && !saved.cloudSynced)) return;
+    const button = document.getElementById('briefing-test');
+    button.disabled = true;
+    this.showError('');
+    try {
+      const result = await window.radarAPI.briefingTest();
+      if (!result || result.status === 'failed' || !result.ok) {
+        this.showError((result && result.error) || 'Test delivery failed');
+      } else if (result.status === 'skipped') {
+        const reason = {
+          empty: 'nothing is due today',
+          disabled: 'briefing is disabled',
+          unverified_email: 'a verified email is unavailable',
+        }[result.reason];
+        this.showError('Test skipped' + (reason ? ' — ' + reason : '') + '.');
+      } else {
+        this.showError('Test email sent.');
+      }
+      const response = await window.radarAPI.briefingPreferences();
+      this.renderDeliveryStatus(response || {});
+    } catch (err) {
+      this.showError('Test delivery failed');
+      console.error('briefing test failed', err);
+    } finally {
+      button.disabled = !this.signedIn;
+    }
+  },
+  wire() {
+    document.getElementById('briefing-close').onclick = () => this.close();
+    document.getElementById('briefing-refresh').onclick = () => this.preview();
+    document.getElementById('briefing-test').onclick = () => this.testSend();
+    document.getElementById('briefing-form').onsubmit = (event) => this.save(event);
+  },
+};
 /* ---------- Sync-config key prompt (see docs/supabase-sync-plan.md's
    notes on the built-in default project URL + first-run key prompt)
    ----------
@@ -364,6 +911,18 @@ const SyncConfigPrompt = {
   },
   async init() {
     if (!HAS_API || !window.radarAPI.syncConfigNeedsKey) return;
+    // A fresh install must choose local-only or begin invited sign-in before
+    // seeing technical sync configuration. Local-only mode keeps the app
+    // quiet until the user explicitly chooses sign-in later.
+    if (window.radarAPI.onboardingGet) {
+      try {
+        const onboarding = await window.radarAPI.onboardingGet();
+        if (!onboarding || onboarding.status !== 'complete' || onboarding.mode === 'local') return;
+      } catch (err) {
+        console.error('onboarding state unavailable; delaying sync prompt', err);
+        return;
+      }
+    }
     let needsKey = false;
     try {
       needsKey = await window.radarAPI.syncConfigNeedsKey();
@@ -487,11 +1046,49 @@ const Sync = {
       // already reconciles two machines, applied here to reconcile "the
       // renderer's in-memory view" against "what main just wrote".
       const fromDisk = await Persist.load();
+      if (
+        fromDisk &&
+        Number.isFinite(Number(fromDisk.schema)) &&
+        Number(fromDisk.schema) > D.SCHEMA
+      )
+        throw new Error('This data file was created by a newer version of Work Radar.');
       if (fromDisk) {
-        const merged = D.mergeDiskIntoStore(fromDisk, Store);
+        const profileChanged =
+          Object.hasOwn(fromDisk, 'profileId') && fromDisk.profileId !== Store.profileId;
+        const merged = profileChanged
+          ? {
+              items: D.migrate(Array.isArray(fromDisk.items) ? fromDisk.items : []),
+              arch: D.migrate(Array.isArray(fromDisk.arch) ? fromDisk.arch : []),
+              lastExport: fromDisk.lastExport || 0,
+              itemRevisions: Array.isArray(fromDisk.itemRevisions) ? fromDisk.itemRevisions : [],
+              attachments: Array.isArray(fromDisk.attachments) ? fromDisk.attachments : [],
+              attachmentRecords: Array.isArray(fromDisk.attachmentRecords)
+                ? fromDisk.attachmentRecords
+                : [],
+              profileId: fromDisk.profileId ?? null,
+            }
+          : D.mergeDiskIntoStore(fromDisk, Store);
         Store.items = merged.items;
         Store.arch = merged.arch;
         Store.lastExport = merged.lastExport;
+        Store.itemRevisions = Array.isArray(merged.itemRevisions)
+          ? merged.itemRevisions
+          : Store.itemRevisions;
+        Store.attachments = Array.isArray(merged.attachments)
+          ? merged.attachments
+          : Store.attachments;
+        Store.attachmentRecords = Array.isArray(merged.attachmentRecords)
+          ? merged.attachmentRecords
+          : Store.attachmentRecords;
+        Store.profileId = merged.profileId ?? null;
+      } else {
+        Store.items = [];
+        Store.arch = [];
+        Store.itemRevisions = [];
+        Store.attachments = [];
+        Store.attachmentRecords = [];
+        Store.profileId = null;
+        Store.ui.sel = null;
       }
       render();
     } catch (err) {
@@ -501,8 +1098,22 @@ const Sync = {
 };
 
 /* ---------- Selectors ---------- */
+function recoveryItems() {
+  const current = new Map(
+    [...Store.items, ...Store.arch].filter((item) => item.deletedAt).map((item) => [item.id, item])
+  );
+  for (const revision of Store.itemRevisions || []) {
+    if (!revision || !revision.itemId || !revision.snapshot || !revision.snapshot.deletedAt)
+      continue;
+    if (!current.has(revision.itemId))
+      current.set(revision.itemId, { ...revision.snapshot, id: revision.itemId, log: [] });
+  }
+  return [...current.values()].sort(
+    (a, b) => (b.deletedAt || 0) - (a.deletedAt || 0) || a.name.localeCompare(b.name)
+  );
+}
 function visibleList() {
-  return D.selectVisible(Store);
+  return Store.ui.view === 'recovery' ? recoveryItems() : D.selectVisible(Store);
 }
 
 /* ---------- Render ---------- */
@@ -533,12 +1144,59 @@ function dateAfter(days) {
 }
 function renderDetail() {
   const panel = document.getElementById('detail-panel');
-  const it = [...stripTombstones(Store.items), ...stripTombstones(Store.arch)].find(
-    (i) => i.id === Store.ui.sel
-  );
+  const it = (
+    Store.ui.view === 'recovery'
+      ? recoveryItems()
+      : [...stripTombstones(Store.items), ...stripTombstones(Store.arch)]
+  ).find((i) => i.id === Store.ui.sel);
   panel.hidden = !it || Store.ui.showForm;
   document.getElementById('inspector').hidden = !it && !Store.ui.showForm;
   if (panel.hidden) return;
+  if (Store.ui.view === 'recovery') {
+    document.getElementById('detail-name').textContent = it.name;
+    document
+      .getElementById('detail-meta')
+      .replaceChildren(node('span', '', 'Deleted ' + fdt(it.deletedAt)));
+    document
+      .getElementById('detail-context')
+      .replaceChildren(
+        node(
+          'p',
+          'field-help',
+          'This project remains recoverable because its edit history is retained.'
+        )
+      );
+    document.getElementById('detail-notes').hidden = true;
+    document.getElementById('detail-schedule').replaceChildren();
+    const actions = document.getElementById('detail-actions');
+    actions.replaceChildren(
+      button(
+        'Restore latest version',
+        () => {
+          const revisions = Store.itemRevisions
+            .filter((revision) => revision.itemId === it.id)
+            .sort(
+              (a, b) =>
+                (b.serverReceivedAt || b.clientTime || 0) -
+                (a.serverReceivedAt || a.clientTime || 0)
+            );
+          const latest = revisions.find((revision) => !revision.snapshot?.deletedAt);
+          if (
+            latest &&
+            confirm('Restore the latest recoverable version of this deleted project?')
+          ) {
+            Actions.restoreRevision(it.id, latest);
+            Store.ui.view = latest.snapshot?.archivedAt ? 'archive' : 'all';
+            render();
+          }
+        },
+        'primary'
+      )
+    );
+    renderHistory(it);
+    document.getElementById('detail-attachments').replaceChildren();
+    return;
+  }
   document.getElementById('detail-name').textContent = it.name;
   const meta = document.getElementById('detail-meta');
   meta.replaceChildren();
@@ -680,6 +1338,8 @@ function renderDetail() {
       log.append(row);
     });
   }
+  renderHistory(it);
+  renderAttachments(it).catch((err) => console.error('attachment list failed', err));
   const compose = document.getElementById('detail-log-compose');
   compose.replaceChildren();
   if (!it.archivedAt) {
@@ -698,6 +1358,142 @@ function renderDetail() {
     compose.append(input, button('Add update', submit));
   }
 }
+function renderHistory(item) {
+  const host = document.getElementById('detail-history');
+  if (!host) return;
+  host.replaceChildren();
+  const revisions = Store.itemRevisions
+    .filter((revision) => revision.itemId === item.id)
+    .sort((a, b) => (b.clientTime || 0) - (a.clientTime || 0));
+  host.append(node('h3', 'eyebrow', 'History · ' + revisions.length + ' saved versions'));
+  if (!revisions.length) {
+    host.append(node('p', 'field-help', 'History starts with the next saved change.'));
+    return;
+  }
+  revisions.slice(0, 100).forEach((revision) => {
+    const row = node('div', 'history-row');
+    const label = node(
+      'button',
+      'history-version',
+      (revision.action || 'edit') + ' · ' + fdt(revision.clientTime)
+    );
+    label.type = 'button';
+    label.addEventListener('click', () => {
+      const compare = document.getElementById('history-compare');
+      compare.replaceChildren();
+      const snapshot = revision.snapshot || {};
+      Object.keys({ ...snapshot, ...item })
+        .filter(
+          (key) =>
+            !['log', 'id'].includes(key) &&
+            JSON.stringify(snapshot[key]) !== JSON.stringify(item[key])
+        )
+        .sort()
+        .forEach((field) => {
+          const change = node(
+            'p',
+            '',
+            field + ': ' + String(snapshot[field] ?? '—') + ' → ' + String(item[field] ?? '—')
+          );
+          compare.append(change);
+        });
+      if (!compare.childNodes.length)
+        compare.append(node('p', 'field-help', 'This version matches the current project.'));
+    });
+    row.append(
+      label,
+      node(
+        'span',
+        'history-state',
+        revision.status === 'pending'
+          ? 'Pending sync'
+          : revision.status === 'superseded'
+            ? 'Superseded'
+            : revision.action === 'restore'
+              ? 'Restored'
+              : 'Saved'
+      )
+    );
+    const restore = button(
+      'Restore',
+      () => {
+        if (confirm('Restore this version as a new edit?')) {
+          Actions.restoreRevision(item.id, revision);
+          renderDetail();
+        }
+      },
+      'quiet'
+    );
+    restore.disabled = Boolean(revision.snapshot?.deletedAt);
+    if (restore.disabled) restore.title = 'Deleted snapshots cannot be restored directly';
+    row.append(restore);
+    host.append(row);
+  });
+  host.append(node('div', 'history-compare'));
+  host.lastChild.id = 'history-compare';
+}
+
+async function renderAttachments(item) {
+  const host = document.getElementById('detail-attachments');
+  if (!host) return;
+  host.replaceChildren(node('h3', 'eyebrow', 'Attachments'));
+  const add = button(
+    '+ Add file',
+    async () => {
+      if (!HAS_API || !window.radarAPI.attachmentsPickAdd) return;
+      const result = await window.radarAPI.attachmentsPickAdd(item.id);
+      if (result && !result.ok && !result.canceled) alert('ATTACHMENT FAILED — ' + result.error);
+      if (result?.ok && window.radarAPI.attachmentsProcessQueue)
+        await window.radarAPI.attachmentsProcessQueue();
+      renderAttachments(item);
+    },
+    'quiet'
+  );
+  host.append(add);
+  if (!HAS_API || !window.radarAPI.attachmentsList) {
+    host.append(node('p', 'field-help', 'Attachments are available in the desktop app.'));
+    return;
+  }
+  const result = await window.radarAPI.attachmentsList(item.id);
+  if (!result || !result.ok || !result.attachments.length) {
+    host.append(node('p', 'field-help', 'No files attached.'));
+    return;
+  }
+  result.attachments.forEach((attachment) => {
+    const row = node('div', 'attachment-row');
+    const info = node(
+      'span',
+      'attachment-info',
+      attachment.displayName + ' · ' + Math.ceil(attachment.byteSize / 1024) + ' KB'
+    );
+    const state = node(
+      'span',
+      'attachment-state',
+      attachment.ownerId ? attachment.status || 'pending' : 'On this device'
+    );
+    const open = button(
+      'Open',
+      async () => {
+        const opened = await window.radarAPI.attachmentsOpen(attachment.id);
+        if (opened && !opened.ok) alert('ATTACHMENT UNAVAILABLE — ' + opened.error);
+      },
+      'quiet'
+    );
+    const remove = button(
+      'Remove',
+      async () => {
+        if (confirm('Remove this attachment?')) {
+          await window.radarAPI.attachmentsRemove(attachment.id);
+          renderAttachments(item);
+        }
+      },
+      'quiet'
+    );
+    row.append(info, state, open, remove);
+    host.append(row);
+  });
+}
+
 function renderList() {
   const list = document.getElementById('list');
   list.querySelectorAll('.contact-row, .contact-list-entry').forEach((el) => el.remove());
@@ -747,8 +1543,13 @@ function renderList() {
     const dot = node('span', 'contact-dot');
     dot.style.background = item.archivedAt ? '#546e7a' : PC[item.priority];
     left.append(dot, node('span', 'contact-name', item.name));
-    const right = node('span', 'contact-right', item.archivedAt ? 'Archived' : item.status);
-    right.style.color = item.archivedAt ? '#546e7a' : SC[item.status];
+    const right = node(
+      'span',
+      'contact-right',
+      Store.ui.view === 'recovery' ? 'Deleted' : item.archivedAt ? 'Archived' : item.status
+    );
+    right.style.color =
+      Store.ui.view === 'recovery' ? '#8b4b4b' : item.archivedAt ? '#546e7a' : SC[item.status];
     main.append(left, right);
     row.append(main);
     const context = [
@@ -777,6 +1578,7 @@ function renderList() {
 function render() {
   const today = Store.ui.view === 'today';
   const archive = Store.ui.view === 'archive';
+  const recovery = Store.ui.view === 'recovery';
   document
     .getElementById('body')
     .classList.toggle('editing-project', Store.ui.showForm && Store.ui.view === 'all');
@@ -788,20 +1590,24 @@ function render() {
     t.classList.toggle('active', active);
     t.setAttribute('aria-pressed', String(active));
   });
-  document.getElementById('all-controls').hidden = today;
-  document.getElementById('filter').hidden = archive;
-  document.getElementById('archive-btn').hidden = today;
+  document.getElementById('all-controls').hidden = today || recovery;
+  document.getElementById('filter').hidden = archive || recovery;
+  document.getElementById('archive-btn').hidden = today || recovery;
   document.getElementById('archive-btn').textContent = archive ? '← All projects' : 'Archive';
   document.getElementById('view-title').textContent = today
     ? "Today's radar"
-    : archive
-      ? 'Archive'
-      : 'All projects';
+    : recovery
+      ? 'Recovery'
+      : archive
+        ? 'Archive'
+        : 'All projects';
   document.getElementById('view-subtitle').textContent = today
     ? 'What needs your attention, and why.'
-    : archive
-      ? 'Finished for now. Restore a project whenever you need it.'
-      : 'Everything you’re keeping in sight.';
+    : recovery
+      ? 'Deleted projects with retained history can be restored here.'
+      : archive
+        ? 'Finished for now. Restore a project whenever you need it.'
+        : 'Everything you’re keeping in sight.';
   document.getElementById('view-date').textContent = new Date().toLocaleDateString(undefined, {
     weekday: 'short',
     month: 'short',
@@ -990,7 +1796,19 @@ function wire() {
   });
   document.getElementById('export-json-btn').addEventListener('click', () => Actions.exportJSON());
   document.getElementById('export-pdf-btn').addEventListener('click', () => Actions.exportPDF());
+  document.getElementById('export-full-btn').addEventListener('click', () => Actions.exportFull());
+  document.getElementById('import-full-btn').addEventListener('click', () => Actions.importFull());
   document.getElementById('import-btn').addEventListener('click', () => Actions.importJSON());
+  if (HAS_API && window.radarAPI.attachmentsProcessQueue) {
+    const refreshAttachments = () => {
+      const refresh = window.radarAPI.attachmentsRefresh?.();
+      const queue = window.radarAPI.attachmentsProcessQueue?.();
+      Promise.allSettled([refresh, queue]).catch(() => {});
+    };
+    window.addEventListener('focus', refreshAttachments);
+    if (typeof window.setInterval === 'function') window.setInterval(refreshAttachments, 60000);
+  }
+
   document.getElementById('import-file').addEventListener('change', (e) => {
     const f = e.target.files[0];
     if (!f) return;
@@ -1005,7 +1823,9 @@ function wire() {
         return;
       }
       try {
-        Actions.mergeImported(parsed);
+        const imported = Actions.mergeImported(parsed);
+        if (imported && Onboarding.state && Onboarding.state.status !== 'complete')
+          Onboarding.finish();
       } catch (err) {
         console.error('import merge failed', err);
         alert('IMPORT FAILED — the file merged with unexpected data. See console for details.');
@@ -1070,9 +1890,12 @@ function wire() {
       else if (action === 'search') focusSearch();
       else if (action === 'export') Actions.exportJSON();
       else if (action === 'exportPDF') Actions.exportPDF();
+      else if (action === 'exportFull') Actions.exportFull();
       else if (action === 'import') Actions.importJSON();
+      else if (action === 'importFull') Actions.importFull();
       else if (action === 'reveal' && window.radarAPI.revealBackups)
         window.radarAPI.revealBackups();
+      else if (action === 'welcome') Onboarding.reopen();
     });
   }
 
@@ -1098,7 +1921,8 @@ function wire() {
 /* ---------- Boot ---------- */
 (async function boot() {
   wire();
-  Auth.init().catch((err) => console.error('Auth.init failed', err));
+  await Auth.init().catch((err) => console.error('Auth.init failed', err));
+  Briefing.wire();
   Sync.init();
   SyncConfigPrompt.init().catch((err) => console.error('SyncConfigPrompt.init failed', err));
   try {
@@ -1116,4 +1940,5 @@ function wire() {
     );
   }
   render();
+  Onboarding.init().catch((err) => console.error('Onboarding.init failed', err));
 })();

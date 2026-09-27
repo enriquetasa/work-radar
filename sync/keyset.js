@@ -30,8 +30,11 @@ const EPOCH_ISO = '1970-01-01T00:00:00.000Z';
 // synced_at value; the very first page of a pull has no prior row to
 // key off, so it uses a plain `gt(synced_at, sinceIso)` instead (see
 // sync-engine.js's defaultPullPage).
-function keysetOrFilter(sinceIso, afterId) {
-  return `synced_at.gt.${sinceIso},and(synced_at.eq.${sinceIso},id.gt.${afterId})`;
+function keysetOrFilter(sinceIso, afterId, cursorField = 'synced_at') {
+  if (!['synced_at', 'server_received_at'].includes(cursorField)) {
+    throw new Error('unsupported pull cursor field');
+  }
+  return `${cursorField}.gt.${sinceIso},and(${cursorField}.eq.${sinceIso},id.gt.${afterId})`;
 }
 
 // Pages through `pageFn` from `cursorMs - lookbackMs` (or the epoch, if
@@ -40,7 +43,15 @@ function keysetOrFilter(sinceIso, afterId) {
 // cursor: the greatest `synced_at` actually seen, converted back to ms
 // — or the unchanged input cursor if nothing came back at all, so a
 // pull that finds nothing never *regresses* the persisted cursor.
-async function pullAll({ pageFn, cursorMs, lookbackMs, pageSize, isoToMs, msToIso }) {
+async function pullAll({
+  pageFn,
+  cursorMs,
+  lookbackMs,
+  pageSize,
+  isoToMs,
+  msToIso,
+  cursorField = 'synced_at',
+}) {
   const sinceMs = cursorMs == null ? null : Math.max(0, cursorMs - lookbackMs);
   let sinceIso = sinceMs == null ? EPOCH_ISO : msToIso(sinceMs);
   let afterId = null;
@@ -54,9 +65,9 @@ async function pullAll({ pageFn, cursorMs, lookbackMs, pageSize, isoToMs, msToIs
     if (!page || !page.length) break;
     rows.push(...page);
     const last = page[page.length - 1];
-    sinceIso = last.synced_at;
+    sinceIso = last[cursorField];
     afterId = last.id;
-    const lastMs = isoToMs(last.synced_at);
+    const lastMs = isoToMs(last[cursorField]);
     if (maxSyncedAtMs == null || lastMs > maxSyncedAtMs) maxSyncedAtMs = lastMs;
     if (page.length < pageSize) break; // short page => reached the end
   }

@@ -5,6 +5,7 @@ const domain = require('../renderer/domain.js');
 const defaultLog = require('../logger');
 const mapping = require('./mapping');
 const outbox = require('./outbox');
+const history = require('./history');
 const syncState = require('./sync-state');
 const atomicJsonFile = require('./atomic-json-file');
 const { classifyError } = require('./classify-error');
@@ -12,7 +13,7 @@ const { decideStaleRemediation } = require('./stale-remediation');
 const { pullAll, keysetOrFilter } = require('./keyset');
 
 function emptyData() {
-  return { schema: domain.SCHEMA, items: [], arch: [], lastExport: 0 };
+  return { schema: domain.SCHEMA, items: [], arch: [], lastExport: 0, itemRevisions: [] };
 }
 
 function buildDefaultPushRpc(client, fnName, argKey) {
@@ -43,11 +44,13 @@ function buildDefaultPushRpc(client, fnName, argKey) {
 }
 
 // Paginate on (synced_at, id) so equal timestamps cannot skip rows.
-function buildDefaultPullPage(client, table) {
+function buildDefaultPullPage(client, table, cursorField = 'synced_at') {
   return async ({ sinceIso, afterId, limit }) => {
     let q = client.from(table).select('*');
-    q = afterId ? q.or(keysetOrFilter(sinceIso, afterId)) : q.gt('synced_at', sinceIso);
-    q = q.order('synced_at', { ascending: true }).order('id', { ascending: true }).limit(limit);
+    q = afterId
+      ? q.or(keysetOrFilter(sinceIso, afterId, cursorField))
+      : q.gt(cursorField, sinceIso);
+    q = q.order(cursorField, { ascending: true }).order('id', { ascending: true }).limit(limit);
     const { data, error } = await q;
     if (error) throw error;
     return data;
@@ -76,12 +79,16 @@ function mergeIntoData(current, incoming, lastExport) {
     { items: current.items || [], arch: current.arch || [] },
     incoming
   );
-  return {
+  let next = {
+    ...current,
     schema: domain.SCHEMA,
     items: merged.items,
     arch: merged.arch,
     lastExport,
   };
+  if (incoming && Array.isArray(incoming.itemRevisions)) next = history.merge(next, incoming);
+  next = history.baselineData(next);
+  return { ...next, itemRevisions: history.retain(next.itemRevisions || []) };
 }
 
 function createSyncEngine(options = {}) {
@@ -112,9 +119,19 @@ function createSyncEngine(options = {}) {
   const pushItemsRpc = options.pushItemsRpc || buildDefaultPushRpc(client, 'push_items', 'items');
   const pushLogEntriesRpc =
     options.pushLogEntriesRpc || buildDefaultPushRpc(client, 'push_log_entries', 'entries');
+  let pushItemRevisionsRpc =
+    options.pushItemRevisionsRpc ||
+    (client && typeof client.rpc === 'function'
+      ? buildDefaultPushRpc(client, 'push_item_revisions', 'revisions')
+      : null);
   const pullItemsPage = options.pullItemsPage || buildDefaultPullPage(client, 'items');
   const pullLogEntriesPage =
     options.pullLogEntriesPage || buildDefaultPullPage(client, 'log_entries');
+  let pullItemRevisionsPage =
+    options.pullItemRevisionsPage ||
+    (client && typeof client.from === 'function'
+      ? buildDefaultPullPage(client, 'item_revisions', 'server_received_at')
+      : null);
   const getItemById = options.getItemById || (client && buildDefaultGetItemById(client));
 
   let intervalHandle = null;
@@ -175,22 +192,37 @@ function createSyncEngine(options = {}) {
   }
 
   // Mutators return { data, result }; null data skips the write.
-  function withDataFile(mutator) {
+  function withDataFile(mutator, guard = () => true) {
     const run = dataQueue.then(async () => {
-      const raw = (await readDataFile(dataFilePath, { log })) || emptyData();
+      if (!guard()) return { data: null, result: null };
+      // Capture the active profile path for the whole serialized operation; an account switch can change the resolver while an old write is in flight.
+      const filePath = dataFilePath;
+      const raw = (await readDataFile(filePath, { log })) || emptyData();
+      if (Number.isSafeInteger(raw.schema) && raw.schema > domain.SCHEMA) {
+        const error = new Error('Unsupported newer Work Radar data schema: ' + raw.schema);
+        error.code = 'UNSUPPORTED_DATA_SCHEMA';
+        throw error;
+      }
+      // Do not let a sign-out/account switch merge into the shared profile file
+      // after an awaited read. The guard is checked again immediately before
+      // the atomic write below.
+      if (!guard()) return { data: null, result: null };
       // Files from schema 2 need deterministic log ids before merging.
       const deduped = domain.mergeState(
         { items: domain.migrate(raw.items || []), arch: domain.migrate(raw.arch || []) },
         { items: [], arch: [] }
       );
       const current = {
+        ...raw,
         schema: domain.SCHEMA,
         items: deduped.items,
         arch: deduped.arch,
         lastExport: raw.lastExport || 0,
+        itemRevisions: Array.isArray(raw.itemRevisions) ? raw.itemRevisions : [],
       };
       const { data: nextData, result } = await mutator(current);
-      if (nextData) await writeJsonFileAtomic(dataFilePath, nextData);
+      if (!guard()) return { data: null, result: null };
+      if (nextData) await writeJsonFileAtomic(filePath, nextData);
       return { data: nextData, result };
     });
     dataQueue = run.then(
@@ -210,17 +242,50 @@ function createSyncEngine(options = {}) {
     const myGeneration = generation;
 
     // Persist locally before auth/session work so offline saves never wait on the network.
-    const { data: mergedPayload, result: diff } = await withDataFile(async (current) => {
-      const nextData = mergeIntoData(
-        current,
-        { items: payload.items || [], arch: payload.arch || [] },
-        payload.lastExport ?? current.lastExport ?? 0
-      );
-      return {
-        data: nextData,
-        result: outbox.diffSnapshot(outbox.snapshotOf(current), outbox.snapshotOf(nextData)),
-      };
-    });
+    const { data: mergedPayload, result: diff } = await withDataFile(
+      async (current) => {
+        current = history.baselineData(current);
+        let nextData = mergeIntoData(
+          current,
+          {
+            items: payload.items || [],
+            arch: payload.arch || [],
+            ...(Array.isArray(payload.itemRevisions)
+              ? { itemRevisions: payload.itemRevisions }
+              : {}),
+          },
+          payload.lastExport ?? current.lastExport ?? 0
+        );
+        const diff = outbox.diffSnapshot(outbox.snapshotOf(current), outbox.snapshotOf(nextData));
+        const changedItems = diff.changedItemIds
+          .map((id) => findLocalItem(nextData, id))
+          .filter(Boolean);
+        const beforeRevisionIds = new Set((current.itemRevisions || []).map((r) => r.id));
+        if (changedItems.length) {
+          const previousById = new Map(
+            [...(current.items || []), ...(current.arch || [])].map((item) => [item.id, item])
+          );
+          nextData = history.append(nextData, changedItems, {
+            action: payload.historyAction || 'edit',
+            sourceDevice: payload.sourceDevice,
+            origin: 'local',
+            restoredFromRevisionId: payload.restoredFromRevisionId,
+            previousById,
+          });
+        }
+        return {
+          data: nextData,
+          result: {
+            ...diff,
+            revisionIds: nextData.itemRevisions
+              .filter((revision) => !beforeRevisionIds.has(revision.id))
+              .map((revision) => revision.id),
+          },
+        };
+      },
+      () => generation === myGeneration
+    );
+    if (!diff) return mergedPayload;
 
     try {
       const { userId, error: sessionError } = await getUserId();
@@ -254,6 +319,14 @@ function createSyncEngine(options = {}) {
             ...userState,
             pendingItemIds: outbox.unionIds(userState.pendingItemIds, diff.changedItemIds),
             pendingLogEntryIds: outbox.unionIds(userState.pendingLogEntryIds, diff.newLogEntryIds),
+            ...(pushItemRevisionsRpc && diff.revisionIds
+              ? {
+                  pendingRevisionIds: outbox.unionIds(
+                    userState.pendingRevisionIds,
+                    diff.revisionIds
+                  ),
+                }
+              : {}),
             snapshot: nextSnapshot,
           },
           result: null,
@@ -285,6 +358,9 @@ function createSyncEngine(options = {}) {
     await withUserState(userId, (userState) => {
       const nextSnapshot = outbox.snapshotOf(data);
       const diff = outbox.diffSnapshot(userState.snapshot, nextSnapshot);
+      const revisionIds = (data.itemRevisions || []).map((revision) => revision.id);
+      const knownRevisionIds = new Set(userState.revisionIds || []);
+      const newRevisionIds = revisionIds.filter((id) => !knownRevisionIds.has(id));
       if (!userState.firstSyncDone) {
         log.info('first sync: marking all local data pending', {
           cycleId,
@@ -305,6 +381,12 @@ function createSyncEngine(options = {}) {
           ...userState,
           pendingItemIds: outbox.unionIds(userState.pendingItemIds, diff.changedItemIds),
           pendingLogEntryIds: outbox.unionIds(userState.pendingLogEntryIds, diff.newLogEntryIds),
+          ...(pushItemRevisionsRpc
+            ? {
+                pendingRevisionIds: outbox.unionIds(userState.pendingRevisionIds, newRevisionIds),
+                revisionIds: outbox.unionIds(userState.revisionIds, revisionIds),
+              }
+            : {}),
           snapshot: nextSnapshot,
           firstSyncDone: true,
         },
@@ -313,24 +395,47 @@ function createSyncEngine(options = {}) {
     });
   }
 
-  async function pushPendingItems(userId, cycleId, counts) {
-    const data = await peekDataFile();
+  async function pushPendingItems(userId, cycleId, counts, guard = () => true) {
+    // Seed a deterministic baseline in memory before the first item push so
+    // the server trigger can use its ID as the canonical revision. The actual
+    // envelope write happens after the item RPC succeeds.
+    const data = history.baselineData(await peekDataFile());
     const { itemsById } = outbox.indexData(data);
+    const latestRevisionByItem = new Map();
+    for (const revision of data.itemRevisions || []) {
+      const previous = latestRevisionByItem.get(revision.itemId);
+      if (!previous || (revision.clientTime || 0) > (previous.clientTime || 0)) {
+        latestRevisionByItem.set(revision.itemId, revision);
+      }
+    }
     const userState = await peekUserState(userId);
     const toPush = [];
     const missingIds = [];
     userState.pendingItemIds.forEach((id) => {
       const item = itemsById.get(id);
-      if (item) toPush.push(item);
-      else missingIds.push(id);
+      if (item) {
+        const revision = latestRevisionByItem.get(id);
+        toPush.push({ item, revision });
+      } else missingIds.push(id);
     });
 
     // Do not clear an id if a newer edit landed while its RPC was in flight.
-    const pushedUpdatedAtById = new Map(toPush.map((it) => [it.id, it.updatedAt]));
+    const pushedUpdatedAtById = new Map(toPush.map(({ item }) => [item.id, item.updatedAt]));
     const acceptedIds = new Set();
     const staleIds = [];
     for (const batch of outbox.chunk(toPush, pushBatchSize)) {
-      const rows = batch.map(mapping.itemToPushRow);
+      const rows = batch.map(({ item, revision }) => ({
+        ...mapping.itemToPushRow(item),
+        ...(revision
+          ? {
+              revisionId: revision.id,
+              revisionAction: revision.action || 'edit',
+              revisionSourceDevice: revision.sourceDevice || null,
+              revisionRestoredFrom: revision.restoredFromRevisionId || null,
+              revisionClientTime: mapping.msToIso(revision.clientTime),
+            }
+          : {}),
+      }));
       const results = await pushItemsRpc(rows);
       counts.pushedItems += rows.length;
       results.forEach((r) => {
@@ -357,11 +462,11 @@ function createSyncEngine(options = {}) {
       };
     });
 
-    if (staleIds.length) await remediateStaleItems(userId, staleIds, cycleId);
+    if (staleIds.length) await remediateStaleItems(userId, staleIds, cycleId, guard);
   }
 
   // Resolve harmless retries; re-stamp only exact-timestamp content conflicts.
-  async function remediateStaleItems(userId, staleIds, cycleId) {
+  async function remediateStaleItems(userId, staleIds, cycleId, guard = () => true) {
     if (!getItemById) return;
     const resolvedIds = [];
     const comparedUpdatedAtById = new Map();
@@ -384,7 +489,7 @@ function createSyncEngine(options = {}) {
       }
       const remoteItem = mapping.rowToItem(remoteRow);
 
-      await withDataFile(async (current) => {
+      const mergeResult = await withDataFile(async (current) => {
         const local = findLocalItem(current, id);
         if (!local) {
           resolvedIds.push(id);
@@ -409,7 +514,8 @@ function createSyncEngine(options = {}) {
           data: replaceItemInData(current, id, { ...local, updatedAt: bumpedUpdatedAt }),
           result: null,
         };
-      });
+      }, guard);
+      if (!mergeResult.data && !guard()) return;
     }
 
     if (didReStamp) notifyReload();
@@ -424,6 +530,127 @@ function createSyncEngine(options = {}) {
           result: null,
         };
       });
+    }
+  }
+
+  async function ensureHistoryBaselines(guard = () => true) {
+    const data = await peekDataFile();
+    const seeded = history.baselineData(data);
+    if ((seeded.itemRevisions || []).length === (data.itemRevisions || []).length) return;
+    await withDataFile(async () => ({ data: seeded, result: null }), guard);
+  }
+
+  async function pushPendingRevisions(userId, cycleId, counts, guard = () => true) {
+    if (!pushItemRevisionsRpc) return;
+    const data = await peekDataFile();
+    const byId = new Map((data.itemRevisions || []).map((revision) => [revision.id, revision]));
+    const userState = await peekUserState(userId);
+    const pending = (userState.pendingRevisionIds || []).map((id) => byId.get(id)).filter(Boolean);
+    const missingIds = (userState.pendingRevisionIds || []).filter((id) => !byId.has(id));
+    const resolvedIds = new Set(missingIds);
+    for (const batch of outbox.chunk(pending, pushBatchSize)) {
+      const rows = batch.map(mapping.revisionToPushRow);
+      let results;
+      try {
+        results = await pushItemRevisionsRpc(rows);
+      } catch (err) {
+        if (
+          err &&
+          (err.code === 'PGRST202' ||
+            err.code === 'PGRST404' ||
+            err.code === '42883' ||
+            err.name === 'AssertionError' ||
+            (err.name === 'TypeError' && /not a function/.test(err.message || '')))
+        ) {
+          pushItemRevisionsRpc = null;
+          log.warn('history push unavailable; retaining local revisions', { cycleId, err });
+          return;
+        }
+        throw err;
+      }
+      counts.pushedRevisions += rows.length;
+      results.forEach((result) => {
+        if (result.accepted || result.reason === 'duplicate') {
+          resolvedIds.add(result.row_id);
+          if (result.accepted) counts.pushedRevisionsAccepted += 1;
+        } else {
+          log.warn('push_item_revisions row rejected', {
+            cycleId,
+            id: result.row_id,
+            reason: result.reason,
+          });
+        }
+      });
+    }
+    if (!resolvedIds.size) return;
+    await withDataFile(async (current) => {
+      const next = {
+        ...current,
+        itemRevisions: (current.itemRevisions || []).map((revision) =>
+          resolvedIds.has(revision.id) ? { ...revision, status: 'synced' } : revision
+        ),
+      };
+      return { data: history.markSuperseded(next), result: null };
+    }, guard);
+    await withUserState(userId, (state) => ({
+      userState: {
+        ...state,
+        pendingRevisionIds: outbox.removeIds(state.pendingRevisionIds, [...resolvedIds]),
+      },
+      result: null,
+    }));
+  }
+
+  async function pullItemRevisionsAndMerge(userId, cycleId, counts, guard = () => true) {
+    if (!pullItemRevisionsPage) return;
+    const userState = await peekUserState(userId);
+    let pulled;
+    try {
+      pulled = await pullAll({
+        pageFn: pullItemRevisionsPage,
+        cursorMs: userState.revisionCursor,
+        lookbackMs,
+        pageSize: pullPageSize,
+        isoToMs: mapping.isoToMs,
+        msToIso: mapping.msToIso,
+        cursorField: 'server_received_at',
+      });
+    } catch (err) {
+      // History is additive. A deployment without its migration (or a test
+      // double that only implements the existing tables) must not break item
+      // sync. A transient network error remains visible and retryable.
+      if (
+        err &&
+        (err.code === '42P01' ||
+          err.code === 'PGRST205' ||
+          err.name === 'AssertionError' ||
+          (err.name === 'TypeError' && /not a function/.test(err.message || '')))
+      ) {
+        pullItemRevisionsPage = null;
+        log.warn('history pull unavailable; continuing current-item sync', { cycleId, err });
+        return;
+      }
+      throw err;
+    }
+    const { rows, cursor } = pulled;
+    counts.pulledRevisions = rows.length;
+    let merged = null;
+    if (rows.length) {
+      const revisions = rows.map(mapping.rowToRevision).filter(Boolean);
+      ({ data: merged } = await withDataFile(
+        async (current) => ({
+          data: history.merge(current, { itemRevisions: revisions }),
+          result: null,
+        }),
+        guard
+      ));
+      if (merged) notifyReload();
+    }
+    if (cursor != null || merged) {
+      await withUserState(userId, (state) => ({
+        userState: { ...state, ...(cursor != null ? { revisionCursor: cursor } : {}) },
+        result: null,
+      }));
     }
   }
 
@@ -475,7 +702,7 @@ function createSyncEngine(options = {}) {
     }));
   }
 
-  async function pullItemsAndMerge(userId, cycleId, counts) {
+  async function pullItemsAndMerge(userId, cycleId, counts, guard = () => true) {
     const userState = await peekUserState(userId);
     const { rows, cursor } = await pullAll({
       pageFn: pullItemsPage,
@@ -506,7 +733,7 @@ function createSyncEngine(options = {}) {
           return { data: null, result: [] };
         }
         return { data: nextData, result: changed.changedItemIds };
-      }));
+      }, guard));
       if (mergedPayload) notifyReload();
     }
 
@@ -525,7 +752,7 @@ function createSyncEngine(options = {}) {
     }
   }
 
-  async function pullLogEntriesAndMerge(userId, cycleId, counts) {
+  async function pullLogEntriesAndMerge(userId, cycleId, counts, guard = () => true) {
     const userState = await peekUserState(userId);
     const { rows, cursor } = await pullAll({
       pageFn: pullLogEntriesPage,
@@ -592,7 +819,7 @@ function createSyncEngine(options = {}) {
         return { data: null, result: [] };
       }
       return { data: nextData, result: changed.newLogEntryIds };
-    }));
+    }, guard));
 
     if (mergedPayload) notifyReload();
 
@@ -647,25 +874,37 @@ function createSyncEngine(options = {}) {
       pushedItemsAccepted: 0,
       pushedLogEntries: 0,
       pushedLogEntriesAccepted: 0,
+      pushedRevisions: 0,
+      pushedRevisionsAccepted: 0,
       pulledItems: 0,
       pulledLogEntries: 0,
+      pulledRevisions: 0,
     };
     try {
       await diffLocalChangesIntoOutbox(userId, cycleId);
       if (!stillCurrent()) return;
-      await pushPendingItems(userId, cycleId, counts);
+      await pushPendingItems(userId, cycleId, counts, stillCurrent);
+      if (!stillCurrent()) return;
+      await ensureHistoryBaselines(stillCurrent);
+      await diffLocalChangesIntoOutbox(userId, cycleId);
+      if (!stillCurrent()) return;
+      await pushPendingRevisions(userId, cycleId, counts, stillCurrent);
       if (!stillCurrent()) return;
       await pushPendingLogEntries(userId, cycleId, counts);
       if (!stillCurrent()) return;
-      await pullItemsAndMerge(userId, cycleId, counts);
+      await pullItemsAndMerge(userId, cycleId, counts, stillCurrent);
       if (!stillCurrent()) return;
-      await pullLogEntriesAndMerge(userId, cycleId, counts);
+      await pullLogEntriesAndMerge(userId, cycleId, counts, stillCurrent);
+      if (!stillCurrent()) return;
+      await pullItemRevisionsAndMerge(userId, cycleId, counts, stillCurrent);
       if (!stillCurrent()) return;
 
       const finalState = await peekUserState(userId);
       if (!stillCurrent()) return;
       const clean =
-        finalState.pendingItemIds.length === 0 && finalState.pendingLogEntryIds.length === 0;
+        finalState.pendingItemIds.length === 0 &&
+        finalState.pendingLogEntryIds.length === 0 &&
+        (!pushItemRevisionsRpc || finalState.pendingRevisionIds.length === 0);
       backoffAttempts = 0;
       clearTimeout(retryHandle);
       retryHandle = null;
