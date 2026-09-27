@@ -214,13 +214,42 @@
       });
   }
 
+  function normalizeCategories(values) {
+    const names = new Map();
+    for (const value of values) {
+      if (typeof value !== 'string' || !value.trim()) continue;
+      const name = value.trim();
+      const key = name.toLowerCase();
+      if (!names.has(key)) names.set(key, name);
+    }
+    return [...names.values()].sort((a, b) => a.localeCompare(b));
+  }
+
+  function categoryOptions(state) {
+    if (Array.isArray(state.categoryOptions)) return normalizeCategories(state.categoryOptions);
+    return normalizeCategories(
+      [...(state.items || []), ...(state.arch || [])]
+        .filter((item) => !item.deletedAt)
+        .map((item) => item.category)
+    );
+  }
+
   function serialize(state) {
-    return {
+    const data = {
       schema: SCHEMA,
       items: state.items,
       arch: state.arch,
       lastExport: state.lastExport,
     };
+    // History, attachment metadata, and future additive envelope fields are
+    // intentionally copied through export/import. Keep the legacy shape when
+    // no feature metadata exists so older backups remain compatible.
+    ['itemRevisions', 'attachments', 'attachmentRecords', 'profileId', 'categoryOptions'].forEach(
+      (key) => {
+        if (state[key] !== undefined) data[key] = state[key];
+      }
+    );
+    return data;
   }
 
   // Filter + sort the current view. Pure: derives from state, never mutates it.
@@ -553,11 +582,34 @@ ${groupsHTML}
       { items: store.items, arch: store.arch }
     );
     // An in-flight export must not be rolled back by stale disk state.
-    return {
+    const mergedState = {
       items: merged.items,
       arch: merged.arch,
       lastExport: Math.max(fromDisk.lastExport || 0, store.lastExport || 0),
     };
+    // A reload must not rebuild the envelope from only items/arch and discard
+    // history or attachment metadata introduced by a newer writer.
+    ['itemRevisions', 'attachments', 'attachmentRecords', 'profileId'].forEach((key) => {
+      if (Array.isArray(fromDisk[key]) || Array.isArray(store[key])) {
+        const rows = [
+          ...(Array.isArray(fromDisk[key]) ? fromDisk[key] : []),
+          ...(Array.isArray(store[key]) ? store[key] : []),
+        ];
+        const byId = new Map();
+        rows.forEach((row) => {
+          const id = row && row.id;
+          if (id !== undefined) byId.set(id, row);
+        });
+        mergedState[key] = [...byId.values()];
+      } else if (fromDisk[key] !== undefined || store[key] !== undefined) {
+        mergedState[key] = store[key] !== undefined ? store[key] : fromDisk[key];
+      }
+    });
+    // Keep unsaved dropdown edits, including an explicitly emptied list.
+    if (store.categoryOptions !== undefined || fromDisk.categoryOptions !== undefined) {
+      mergedState.categoryOptions = store.categoryOptions ?? fromDisk.categoryOptions ?? null;
+    }
+    return mergedState;
   }
 
   // Deterministic blip placement: a golden-angle spiral keyed off the id,
@@ -598,6 +650,8 @@ ${groupsHTML}
     isStale,
     migrate,
     serialize,
+    normalizeCategories,
+    categoryOptions,
     selectVisible,
     stripTombstones,
     mergeItem,

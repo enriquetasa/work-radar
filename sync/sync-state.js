@@ -20,6 +20,9 @@ function emptyUserState() {
   return {
     pendingItemIds: [],
     pendingLogEntryIds: [],
+    pendingRevisionIds: [],
+    revisionCursor: null,
+    revisionIds: [],
     itemsCursor: null,
     logEntriesCursor: null,
     snapshot: { items: {}, logEntryIds: [] },

@@ -35,7 +35,7 @@ URL-only override to a different project requires that project's key.
 release is published (including prereleases). Ordinary branch pushes, pull
 requests, draft creation, release edits, and manual dispatch do not trigger it:
 
-1. Check that a tag matches `package.json` (for example `v2.0.0`).
+1. Check that a tag matches `package.json` (for example `v0.1.0`).
 2. Run lint, formatting, and unit tests.
 3. Start a fresh local Supabase stack, applying all committed migrations, and
    run the authentication, two-device, realtime, and isolation integration tests.
@@ -48,7 +48,7 @@ requests, draft creation, release edits, and manual dispatch do not trigger it:
    creation/upload, so an already-published release cannot cause that job to fail.
 
 Use a version tag matching `package.json` for either route (for example
-`v2.0.0`). Publishing a release after its tag build triggers another build;
+`v0.1.0`, or `v0.1` when the patch version is zero). Publishing a release after its tag build triggers another build;
 the existing release downloads are retained. To produce downloads before
 publication, push the version tag and then publish the resulting draft.
 

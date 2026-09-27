@@ -16,6 +16,8 @@ module.exports = [
   {
     files: [
       'main.js',
+      'briefing.js',
+      'onboarding-store.js',
       'preload.js',
       'logger.js',
       'eslint.config.js',
@@ -40,6 +42,8 @@ module.exports = [
         WorkRadarDomain: 'readonly',
         WorkRadarAuthView: 'readonly',
         WorkRadarSyncView: 'readonly',
+        WorkRadarOnboardingView: 'readonly',
+        WorkRadarBriefingView: 'readonly',
       },
     },
   },
@@ -48,7 +52,13 @@ module.exports = [
   // run as a browser global AND as a CommonJS module under node:test,
   // so they see both global sets.
   {
-    files: ['renderer/domain.js', 'renderer/auth-view.js', 'renderer/sync-view.js'],
+    files: [
+      'renderer/domain.js',
+      'renderer/auth-view.js',
+      'renderer/sync-view.js',
+      'renderer/onboarding-view.js',
+      'renderer/briefing-view.js',
+    ],
     languageOptions: {
       ecmaVersion: 2023,
       sourceType: 'script',
