@@ -62,7 +62,16 @@ jobs:
           cache: npm
       - run: npm ci
       - name: Build desktop downloads
-        run: npm run build -- --${{ matrix.platform }} --${{ matrix.arch }} --publish never
+        shell: bash
+        run: |
+          # Unset optional credentials when absent: an empty CSC_LINK is treated
+          # as a certificate file path by Electron Builder on macOS.
+          for signing_var in CSC_LINK CSC_KEY_PASSWORD APPLE_ID APPLE_APP_SPECIFIC_PASSWORD APPLE_TEAM_ID; do
+            if [[ -z "${!signing_var}" ]]; then
+              unset "$signing_var"
+            fi
+          done
+          npm run build -- --${{ matrix.platform }} --${{ matrix.arch }} --publish never
         env:
           WORK_RADAR_REQUIRE_SYNC: '1'
           WORK_RADAR_RELEASE_SUPABASE_URL: ${{ vars.WORK_RADAR_RELEASE_SUPABASE_URL }}
