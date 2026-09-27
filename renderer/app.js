@@ -548,9 +548,11 @@ const Account = {
 const Onboarding = {
   state: null,
   step: 'welcome',
+  _handlersBound: false,
   async init() {
     const overlay = document.getElementById('welcome-overlay');
     if (!overlay) return;
+    this.bindHandlers();
     let state = null;
     if (HAS_API && window.radarAPI.onboardingGet) {
       try {
@@ -567,6 +569,10 @@ const Onboarding = {
     }
     this.state = state || { status: 'new', step: 'welcome' };
     Auth.render(Auth.status);
+    if (Auth.status.signedIn && Auth.status.profileRequired) {
+      this.requireAssociation();
+      return;
+    }
     if (
       !WorkRadarOnboardingView.shouldShow(
         this.state,
@@ -577,9 +583,15 @@ const Onboarding = {
       return;
     overlay.hidden = false;
     document.getElementById('app').inert = true;
+    document.getElementById('welcome-signin').hidden = !Auth.status.configured;
+    if (this.state.step === 'signin' && this.state.status === 'in_progress') this.showSignIn();
+    else this.showWelcome();
+  },
+  bindHandlers() {
+    if (this._handlersBound) return;
+    this._handlersBound = true;
     document.getElementById('welcome-local').onclick = () => this.chooseLocal();
     document.getElementById('welcome-import').onclick = () => this.importBackup();
-    document.getElementById('welcome-signin').hidden = !Auth.status.configured;
     document.getElementById('welcome-signin').onclick = () => this.showSignIn();
     document.getElementById('welcome-back').onclick = () => this.showWelcome();
     document.getElementById('welcome-signin-form').onsubmit = (e) => {
@@ -593,8 +605,6 @@ const Onboarding = {
     document.getElementById('welcome-dismiss').onclick = () => this.finish();
     document.getElementById('welcome-associate').onclick = () => this.associate(false);
     document.getElementById('welcome-keep-local').onclick = () => this.associate(true);
-    if (this.state.step === 'signin' && this.state.status === 'in_progress') this.showSignIn();
-    else this.showWelcome();
   },
   async persist(patch) {
     this.state = { ...this.state, ...patch };
@@ -664,6 +674,7 @@ const Onboarding = {
   requireAssociation() {
     const overlay = document.getElementById('welcome-overlay');
     if (!overlay) return;
+    this.bindHandlers();
     overlay.hidden = false;
     document.getElementById('app').inert = true;
     document.getElementById('welcome-start-actions').hidden = true;
@@ -675,16 +686,21 @@ const Onboarding = {
   },
   async associate(separate = false) {
     const status = document.getElementById('welcome-association-status');
-    const result = separate
-      ? await window.radarAPI.profileUseSeparate()
-      : await window.radarAPI.profileAssociate();
-    if (!result || !result.ok) {
-      status.textContent = (result && result.error) || 'Could not associate this profile';
-      return;
+    try {
+      const result = separate
+        ? await window.radarAPI.profileUseSeparate()
+        : await window.radarAPI.profileAssociate();
+      if (!result || !result.ok) {
+        status.textContent = (result && result.error) || 'Could not associate this profile';
+        return;
+      }
+      document.getElementById('welcome-association').hidden = true;
+      await window.radarAPI.onboardingMarkSignedIn();
+      this.finish();
+    } catch (err) {
+      console.error('profile association failed', err);
+      status.textContent = 'Could not associate this profile';
     }
-    document.getElementById('welcome-association').hidden = true;
-    await window.radarAPI.onboardingMarkSignedIn();
-    this.finish();
   },
   showFinal() {
     document.getElementById('welcome-association').hidden = true;

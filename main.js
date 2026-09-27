@@ -1036,7 +1036,13 @@ ipcMain.handle('sync:status', async () => {
 ipcMain.handle('auth:status', async () => {
   if (!authService) return { configured: false };
   const status = await authService.getStatus();
-  return { configured: true, ...status };
+  const state = await profileState();
+  const profileRequired = !!(
+    status.signedIn &&
+    state.activeUserId !== status.userId &&
+    (await hasLocalProjectData())
+  );
+  return { configured: true, ...status, profileRequired };
 });
 
 ipcMain.handle('auth:signIn', async (_e, email) => {
