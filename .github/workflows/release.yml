@@ -81,6 +81,27 @@ jobs:
           APPLE_ID: ${{ matrix.platform == 'mac' && secrets.APPLE_ID || '' }}
           APPLE_APP_SPECIFIC_PASSWORD: ${{ matrix.platform == 'mac' && secrets.APPLE_APP_SPECIFIC_PASSWORD || '' }}
           APPLE_TEAM_ID: ${{ matrix.platform == 'mac' && secrets.APPLE_TEAM_ID || '' }}
+      - name: Verify signed Mac download
+        if: matrix.platform == 'mac'
+        shell: bash
+        env:
+          VERIFY_SIGNING: ${{ secrets.MAC_CSC_LINK != '' }}
+        run: |
+          if [[ "$VERIFY_SIGNING" != 'true' ]]; then
+            echo 'Unsigned test build: skipping Developer ID verification.'
+            exit 0
+          fi
+          shopt -s nullglob
+          dmg_files=(dist/*.dmg)
+          [[ ${#dmg_files[@]} -eq 1 ]]
+          mount_dir="$RUNNER_TEMP/work-radar-verification"
+          mkdir -p "$mount_dir"
+          hdiutil attach "${dmg_files[0]}" -nobrowse -readonly -mountpoint "$mount_dir"
+          trap 'hdiutil detach "$mount_dir"' EXIT
+          app_path="$mount_dir/Work Radar.app"
+          codesign --verify --deep --strict --verbose=2 "$app_path"
+          xcrun stapler validate "$app_path"
+          spctl --assess --type execute --verbose=2 "$app_path"
       - uses: actions/upload-artifact@v4
         with:
           name: work-radar-${{ matrix.platform }}-${{ matrix.arch }}

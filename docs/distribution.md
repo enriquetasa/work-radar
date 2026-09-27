@@ -69,6 +69,10 @@ For ordinary distribution, configure signing before building the release:
   certificate. Hardware/cloud signing may require adapting the Windows signing
   configuration to your provider instead of a certificate file.
 
+When the Mac signing certificate secret is configured, CI mounts the finished
+DMG and verifies the app's signature, stapled notarization ticket, and Gatekeeper
+acceptance before uploading the downloads. A failed check blocks that artifact.
+
 Credentials are passed only to the matching platform's build step. Supplying
 signing credentials does not replace checking the actual downloaded artifacts:
 verify macOS signing/notarization and Windows Authenticode on fresh machines.
