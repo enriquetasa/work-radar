@@ -35,7 +35,10 @@ Runtime `WORK_RADAR_SUPABASE_*` variables are not automatically embedded.
 
 See [Distribution and release setup](docs/distribution.md) for GitHub Actions,
 signing credentials, hosted Supabase checks, and fresh-install testing.
-Tag builds create a **draft** release; manual workflow runs only upload artifacts.
+App builds run only on pushed `v*` tags or published GitHub releases (including
+prereleases). Tag builds create a **draft** release; release-publication builds
+upload workflow artifacts and leave the published release unchanged.
+Ordinary branch pushes and manual workflow dispatch do not trigger app builds.
 Automatic updates are deferred until the first release is validated.
 
 ### Launch on login

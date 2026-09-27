@@ -31,7 +31,9 @@ URL-only override to a different project requires that project's key.
 
 ## Automated draft releases
 
-`.github/workflows/release.yml` runs on `v*` tags and manual dispatch:
+`.github/workflows/release.yml` runs when a `v*` tag is pushed or a GitHub
+release is published (including prereleases). Ordinary branch pushes, pull
+requests, draft creation, release edits, and manual dispatch do not trigger it:
 
 1. Check that a tag matches `package.json` (for example `v2.0.0`).
 2. Run lint, formatting, and unit tests.
@@ -42,6 +44,13 @@ URL-only override to a different project requires that project's key.
 5. Upload downloads as workflow artifacts. Tag runs also collect them in a
    draft GitHub release with SHA-256 checksums. Reruns can replace assets only
    while the release remains a draft; published releases are never overwritten.
+   Release-publication runs only upload workflow artifacts and skip draft
+   creation/upload, so an already-published release cannot cause that job to fail.
+
+Use a version tag matching `package.json` for either route (for example
+`v2.0.0`). Publishing a release after its tag build triggers another build;
+the existing release downloads are retained. To produce downloads before
+publication, push the version tag and then publish the resulting draft.
 
 In GitHub repository Settings → Secrets and variables → Actions, configure:
 
