@@ -69,27 +69,6 @@ let supabaseClient = null;
 let authGeneration = 0;
 let localDataQueue = Promise.resolve();
 let attachmentService = null;
-const attachmentClientRef = { current: null };
-const attachmentStorageProxy = new Proxy(
-  {},
-  {
-    get: (_target, property) => {
-      const storage = attachmentClientRef.current?.storage;
-      const value = storage?.[property];
-      return typeof value === 'function' ? value.bind(storage) : value;
-    },
-  }
-);
-const attachmentClientProxy = new Proxy(
-  {},
-  {
-    get: (_target, property) => {
-      if (property === 'storage') return attachmentStorageProxy;
-      const value = attachmentClientRef.current?.[property];
-      return typeof value === 'function' ? value.bind(attachmentClientRef.current) : value;
-    },
-  }
-);
 
 const readJSON = (file) => readJsonFile(file, { log });
 const atomicWrite = (file, data) => writeJsonFileAtomic(file, data, { log });
@@ -121,8 +100,8 @@ function assertPayloadProfile(data, context) {
 }
 const onboardingStore = createOnboardingStore({
   filePath: ONBOARDING_FILE(),
-  read: (file) => readJSON(file),
-  write: (file, value) => atomicWrite(file, value),
+  read: readJSON,
+  write: atomicWrite,
 });
 
 // Backups are best-effort and must never block startup.
@@ -217,34 +196,21 @@ ipcMain.handle('data:save', async (_e, data) => {
     } else {
       const targetFile = DATA_FILE();
       const save = localDataQueue.then(async () => {
-        const current = (await readJSON(targetFile)) || { items: [], arch: [], itemRevisions: [] };
-        const before = new Map(
+        const current = history.baselineData(
+          (await readJSON(targetFile)) || { items: [], arch: [] }
+        );
+        const previousById = new Map(
           [...(current.items || []), ...(current.arch || [])].map((item) => [item.id, item])
         );
-        const changed = [...(data.items || []), ...(data.arch || [])].filter((item) => {
-          const previous = before.get(item.id);
-          return (
-            !previous ||
-            previous.updatedAt !== item.updatedAt ||
-            previous.deletedAt !== item.deletedAt ||
-            previous.archivedAt !== item.archivedAt
-          );
-        });
-        const existingRevisions = Array.isArray(current.itemRevisions) ? current.itemRevisions : [];
-        const incomingRevisions = Array.isArray(data.itemRevisions) ? data.itemRevisions : [];
-        const revisions = [
-          ...new Map(
-            [...existingRevisions, ...incomingRevisions]
-              .filter((revision) => revision && revision.id)
-              .map((revision) => [revision.id, revision])
-          ).values(),
-        ];
-        const enriched = changed.length
-          ? history.append({ ...data, itemRevisions: revisions }, changed, {
-              action: data.historyAction || 'edit',
-              restoredFromRevisionId: data.restoredFromRevisionId,
-            })
-          : { ...data, itemRevisions: revisions };
+        const enriched = history.append(
+          history.merge(data, current),
+          [...(data.items || []), ...(data.arch || [])],
+          {
+            action: data.historyAction || 'edit',
+            restoredFromRevisionId: data.restoredFromRevisionId,
+            previousById,
+          }
+        );
         await atomicWrite(targetFile, enriched);
         return enriched;
       });
@@ -781,12 +747,14 @@ ipcMain.handle('profile:associate', async () => {
 });
 
 function buildAttachmentService(client = null) {
-  if (client) attachmentClientRef.current = client;
-  if (attachmentService) return attachmentService;
+  if (attachmentService) {
+    if (client) attachmentService.setClient(client);
+    return attachmentService;
+  }
   try {
     attachmentService = createAttachmentService({
       rootDir: ATTACHMENTS_DIR(),
-      client: attachmentClientProxy,
+      client,
       accountId: null,
       log,
     });

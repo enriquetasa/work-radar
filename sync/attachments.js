@@ -7,7 +7,6 @@ const { readJsonFile, writeJsonFileAtomic } = require('./atomic-json-file');
 const { createAttachmentStorage } = require('./attachment-storage');
 const { createAttachmentQueue } = require('./attachment-queue');
 const {
-  MAX_ATTACHMENT_BYTES,
   DEFAULT_CACHE_BYTES,
   assertScope,
   attachmentError,
@@ -119,7 +118,6 @@ function createAttachmentService(options = {}) {
     accountId = null,
     metadataFilePath = rootDir && path.join(rootDir, 'attachments-state.json'),
     queueFilePath = rootDir && path.join(rootDir, 'attachments-queue.json'),
-    client = null,
     bucket = BUCKET,
     now = Date.now,
     randomUUID = crypto.randomUUID,
@@ -139,6 +137,7 @@ function createAttachmentService(options = {}) {
   } = options;
   if (!rootDir) throw new Error('createAttachmentService requires rootDir');
   if (!metadataFilePath || !queueFilePath) throw new Error('attachment state paths are required');
+  let client = options.client || null;
   let currentScope = scopeFor(accountId);
   let operationGeneration = 0;
   let metadataQueue = Promise.resolve();
@@ -737,25 +736,22 @@ function createAttachmentService(options = {}) {
   }
 
   return {
-    bucket,
-    maxBytes: MAX_ATTACHMENT_BYTES,
     get currentScope() {
       return currentScope;
+    },
+    setClient(nextClient) {
+      client = nextClient;
     },
     add,
     importBytes,
     enqueueImported,
     discardImport,
     discardImported,
-    create: add,
     get,
     list,
     remove,
-    tombstone: remove,
     download,
-    open: download,
     processQueue,
-    flush: processQueue,
     setAccount,
     associateLocalAccount,
     pullMetadata,
@@ -764,10 +760,6 @@ function createAttachmentService(options = {}) {
     usage: (scope = currentScope) => storage(scope).usage(),
     storage: (scope = currentScope) => storage(scope),
     queue,
-    emptyState,
-    normalizeState,
-    toCloudRow,
-    fromCloudRow,
   };
 }
 

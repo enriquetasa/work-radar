@@ -45,7 +45,7 @@ function itemSnapshot(item) {
   return clone(snapshot);
 }
 
-function revisionId(itemId, snapshot, action, clientTime, explicitId) {
+function revisionId(itemId, action, clientTime, explicitId) {
   if (explicitId) return String(explicitId);
   // Baselines are deterministic across devices; ordinary edits use UUIDs so
   // two saves at the same timestamp remain independently recoverable.
@@ -63,7 +63,7 @@ function makeRevision(item, options = {}) {
       : Date.now();
   const action = options.action || 'edit';
   return {
-    id: revisionId(item.id, snapshot, action, clientTime, options.id),
+    id: revisionId(item.id, action, clientTime, options.id),
     itemId: item.id,
     snapshotSchema: SCHEMA,
     snapshot,
@@ -109,19 +109,19 @@ function sortRevisions(revisions) {
 }
 
 function retain(revisions, pendingIds = new Set(), limit = RETENTION) {
-  const byItem = new Map();
+  const byRevisionId = new Map();
   for (const revision of revisions || []) {
     const normalized = normalizeRevision(revision);
     if (!normalized) continue;
-    const existing = byItem.get(normalized.id);
+    const existing = byRevisionId.get(normalized.id);
     // Prefer a server-acknowledged copy when the same revision was pulled
     // after a local pending copy.
     if (!existing || (existing.status === 'pending' && normalized.status !== 'pending')) {
-      byItem.set(normalized.id, normalized);
+      byRevisionId.set(normalized.id, normalized);
     }
   }
   const grouped = new Map();
-  for (const revision of byItem.values()) {
+  for (const revision of byRevisionId.values()) {
     const list = grouped.get(revision.itemId) || [];
     list.push(revision);
     grouped.set(revision.itemId, list);
@@ -146,10 +146,10 @@ function retain(revisions, pendingIds = new Set(), limit = RETENTION) {
 
 function baselineData(data, options = {}) {
   const existing = Array.isArray(data && data.itemRevisions) ? data.itemRevisions : [];
-  const known = new Set(existing.map((r) => r && r.id));
+  const knownItems = new Set(existing.map((revision) => revision && revision.itemId));
   const additions = [];
   for (const item of [...((data && data.items) || []), ...((data && data.arch) || [])]) {
-    if (!item || !item.id || existing.some((r) => r && r.itemId === item.id)) continue;
+    if (!item || !item.id || knownItems.has(item.id)) continue;
     const revision = makeRevision(item, {
       action: 'baseline',
       clientTime: Number.isFinite(item.updatedAt) ? item.updatedAt : options.now || Date.now(),
@@ -157,14 +157,10 @@ function baselineData(data, options = {}) {
       origin: 'migration',
       status: 'pending',
     });
-    if (!known.has(revision.id)) {
-      known.add(revision.id);
-      additions.push(revision);
-    }
+    knownItems.add(item.id);
+    additions.push(revision);
   }
-  return additions.length
-    ? { ...data, itemRevisions: retain([...existing, ...additions], options.pendingIds) }
-    : { ...data, itemRevisions: retain(existing, options.pendingIds) };
+  return { ...data, itemRevisions: retain([...existing, ...additions], options.pendingIds) };
 }
 
 function shouldRecord(previous, next) {

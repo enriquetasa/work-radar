@@ -120,7 +120,7 @@ function createAttachmentQueue(options = {}) {
     });
   }
 
-  return { enqueue, list, acknowledge, fail, clear, emptyQueueState, normalizeState };
+  return { enqueue, list, acknowledge, fail, clear };
 }
 
 module.exports = { QUEUE_SCHEMA, emptyQueueState, normalizeState, createAttachmentQueue };

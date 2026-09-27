@@ -29,7 +29,7 @@ export function validTimezone(value: unknown): value is string {
 
 export function localDate(timestamp: unknown, timezone: string): string {
   if (typeof timestamp !== 'string' && typeof timestamp !== 'number') return '';
-  const date = typeof timestamp === 'number' ? new Date(timestamp) : new Date(timestamp);
+  const date = new Date(timestamp);
   if (Number.isNaN(date.getTime()) || !validTimezone(timezone)) return '';
   return new Intl.DateTimeFormat('en-CA', { timeZone: timezone }).format(date);
 }

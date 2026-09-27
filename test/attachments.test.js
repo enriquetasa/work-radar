@@ -105,6 +105,25 @@ test('local association copies bytes and queues account upload', async () => {
   assert.equal((await service.queue.list(account)).length, 1);
 });
 
+test('a service created offline can upload existing files after cloud configuration', async (t) => {
+  const root = await tempRoot();
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  const source = path.join(root, 'note.txt');
+  await fsp.writeFile(source, 'hello');
+  const service = createAttachmentService({ rootDir: root });
+  const record = await service.add({ itemId: 'item-1', sourcePath: source });
+  const client = cloudClient();
+
+  service.setClient(client);
+  await service.associateLocalAccount(uuid());
+  await service.processQueue();
+
+  assert.equal(client.calls.uploads, 1);
+  assert.equal(client.calls.inserts, 1);
+  assert.equal((await service.get(record.id)).status, 'available');
+  assert.deepEqual(await service.queue.list(service.currentScope), []);
+});
+
 test('local-only metadata pull is a no-op even when a cloud client exists', async () => {
   const root = await tempRoot();
   const client = {

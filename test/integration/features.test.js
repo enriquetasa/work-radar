@@ -10,7 +10,7 @@ const path = require('node:path');
 const { createRequire } = require('node:module');
 const requireFromPackage = createRequire(require.resolve('../../package.json'));
 const { createClient } = requireFromPackage('@supabase/supabase-js');
-const { createAttachmentService } = require('../../sync/attachments.js');
+const { createAttachmentService, toCloudRow } = require('../../sync/attachments.js');
 
 function localSupabase() {
   const status = JSON.parse(
@@ -190,7 +190,7 @@ test('Storage retry and cross-owner policy remain enforced', async () => {
       });
       const record = await service.add({ itemId, sourcePath: source });
       assert.equal(
-        (await owner.client.from('item_attachments').insert(service.toCloudRow(record))).error,
+        (await owner.client.from('item_attachments').insert(toCloudRow(record))).error,
         null
       );
       const upload = await owner.client.storage
@@ -212,7 +212,7 @@ test('Storage retry and cross-owner policy remain enforced', async () => {
         (
           await other.client
             .from('item_attachments')
-            .insert({ ...service.toCloudRow(record), id: crypto.randomUUID(), owner_id: other.id })
+            .insert({ ...toCloudRow(record), id: crypto.randomUUID(), owner_id: other.id })
         ).error
       );
       assert.ok(
