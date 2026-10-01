@@ -10,7 +10,7 @@ const path = require('node:path');
 const { saveSyncConfigKey } = require('../sync/sync-config-store.js');
 
 async function tmpUserDataDir() {
-  return await fsp.mkdtemp(path.join(os.tmpdir(), 'wr-sync-config-store-'));
+  return fsp.mkdtemp(path.join(os.tmpdir(), 'wr-sync-config-store-'));
 }
 
 const silentLog = { debug() {}, info() {}, warn() {}, error() {}, critical() {} };

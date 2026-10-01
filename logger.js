@@ -1,11 +1,4 @@
 'use strict';
-/* ============================================================
-   WORK RADAR — structured logger (main process)
-   Emits one JSON object per line. Errors go to stderr, everything
-   else to stdout. Set LOG_LEVEL=DEBUG|INFO|WARNING|ERROR|CRITICAL
-   to change verbosity (default INFO).
-   ============================================================ */
-
 const SERVICE = 'work-radar-main';
 const LEVELS = { DEBUG: 10, INFO: 20, WARNING: 30, ERROR: 40, CRITICAL: 50 };
 const MIN = LEVELS[(process.env.LOG_LEVEL || 'INFO').toUpperCase()] ?? LEVELS.INFO;

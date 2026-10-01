@@ -282,7 +282,11 @@ In All, each row also has an **Edit** button that opens the full project editor 
 The editor uses two columns on larger windows and one on smaller windows, with Save and Cancel
 always visible. Saving or cancelling returns to the same filtered list and scroll position.
 `Ctrl/Cmd+Enter` saves while editing; `Esc` cancels. Project editing is available only in All.
-The dark radar aesthetic remains, with a compact header and no spatial radar graphic.
+
+**Radar** plots every live project spatially. Higher-priority projects with nearer review dates
+sit closer to the center; lower-priority projects and later or manually scheduled reviews sit
+farther out. Dot colour represents category, with a legend beside the radar. Select a dot to
+open the same project details and review controls available from the list views.
 
 Projects can have a review rhythm (a number of days, or manual review), a specific next
 review date, a **Waiting on** person/team/event, and a **Next checkpoint** with an optional

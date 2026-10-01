@@ -1,19 +1,4 @@
 'use strict';
-/* ============================================================
-   WORK RADAR — integration tests: Supabase sync (Phase 2, database)
-   Exercises the LOCAL Supabase stack directly over supabase-js: RLS
-   isolation between two users, the push_items / push_log_entries RPCs,
-   and the synced_at trigger.
-
-   Needs `npx supabase start` already running (see README/plan). Never
-   targets a hosted project — the URL and keys are read fresh from
-   `supabase status -o json` every run rather than hardcoded (see the
-   secrets rule); no key is ever committed.
-
-   Deliberately excluded from `npm test` (slow, needs the local stack) —
-   run via `npm run test:integration`.
-   ============================================================ */
-
 const { test, before, after } = require('node:test');
 const assert = require('node:assert/strict');
 const crypto = require('node:crypto');

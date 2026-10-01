@@ -1,20 +1,4 @@
 'use strict';
-/* ============================================================
-   Covers sync/save-key-handler.js's createSaveKeyHandler(), the pure
-   sequencing extracted out of main.js's syncConfig:saveKey IPC handler
-   (see that module's own doc comment) — same pattern as
-   sync/sync-lifecycle.js: a plain function taking injected collaborators,
-   returning a small API, unit-tested with fakes.
-
-   Found in review: two concurrent syncConfig:saveKey calls (caused by a
-   renderer bug that bound the same submit listener twice) both passed
-   the old inline handler's "not yet configured" check before either had
-   finished saving, so both went on to call initSyncAndAuth() — the
-   second one saw auth already built by the first and logged a false
-   "auth could not be initialized" error. This suite drives that race
-   directly with fakes and asserts it can no longer happen.
-   ============================================================ */
-
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 
@@ -227,13 +211,6 @@ test('a call for a DIFFERENT key while a save is in flight does not share that r
   const [firstResult, secondResult] = await Promise.all([first, second]);
 
   assert.deepEqual(firstResult, { ok: true });
-  // The second run starts fresh only once the first has settled — by
-  // then isAlreadyConfigured() is already true, so it never actually
-  // saves the second key at all. Reporting ok:true here (as the plain
-  // "already configured, nothing to do" skip normally does) would be
-  // misleading: it would tell the caller their own key is now in
-  // effect, when really the *first* call's key won instead — so this
-  // specific case (found in review) is reported as its own failure.
   assert.deepEqual(secondResult, { ok: false, error: 'Sync is already configured.' });
   assert.deepEqual(deps.saveCalls, ['sb_publishable_first']);
   assert.equal(deps.initCalls.length, 1);

@@ -1,12 +1,4 @@
 'use strict';
-/* ============================================================
-   WORK RADAR — icon generator
-   Renders the radar motif to build/icon.png with zero external
-   dependencies (no SVG rasteriser is guaranteed on the box), then
-   best-effort derives build/icon.icns on macOS via sips + iconutil.
-   Run via `npm run icon` (also invoked by `prebuild`).
-   ============================================================ */
-
 const fs = require('fs');
 const path = require('path');
 const zlib = require('zlib');
@@ -146,7 +138,7 @@ function render() {
   disc(CX, CY, 10, SWEEP, 0.9);
 }
 
-/* ---------- PNG encoding (RGBA, no filtering) ---------- */
+// PNG encoding
 const CRC_TABLE = (() => {
   const t = new Int32Array(256);
   for (let n = 0; n < 256; n++) {
@@ -196,7 +188,7 @@ function encodePNG() {
   ]);
 }
 
-/* ---------- macOS .icns (best effort) ---------- */
+// macOS icon
 function tryMakeIcns(pngPath) {
   if (process.platform !== 'darwin') return;
   const iconset = path.join(OUT_DIR, 'icon.iconset');

@@ -1,12 +1,4 @@
 'use strict';
-/* ============================================================
-   WORK RADAR — loopback callback request parsing
-   Pure parsing of the redirect Supabase sends the loopback server (see
-   docs/supabase-sync-plan.md → "Sign-in flow"): either
-   `?code=...` (success) or `?error=...&error_description=...` (failure).
-   Framework-free so it's unit-testable without node:http.
-   ============================================================ */
-
 const { URL } = require('url');
 
 const CALLBACK_PATH = '/auth/callback';

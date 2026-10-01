@@ -131,8 +131,6 @@ test('selectVisible archive view ignores live filters', () => {
   assert.equal(out.length, 1);
 });
 
-/* ---------- Mergeable model (Phase 1) ---------- */
-
 test('migrate assigns deterministic ids to legacy log entries missing an id', () => {
   const legacy = [{ name: 'Alpha', id: 'item-1', log: [{ ts: NOW - DAY, text: 'first update' }] }];
   // Two independent "machines" migrating the same legacy data must agree.
@@ -456,7 +454,6 @@ test('mergeItem: unions log entries from both sides by id, sorted by ts', () => 
   );
 });
 
-/* ---------- Item mutations bump updatedAt (Phase 1) ---------- */
 // These are exactly what makes "newest updatedAt wins" merging correct: a
 // mutation that forgot the bump would let a stale copy from another
 // machine silently win, or (for purge) let a deleted item come back.
@@ -529,17 +526,6 @@ test('addLogEntry defaults to uid() for the entry id when no id function is give
   const out = D.addLogEntry(item, 'hi', 500);
   assert.ok(out.log[0].id, 'assigns an id');
 });
-
-/* ---------- Clock-skew-safe updatedAt (Phase 1 review carry-over) ----------
-   Machine clocks differ. If a mutation just stamped updatedAt = Date.now(),
-   an edit made on this machine right after pulling in a copy from another
-   machine whose clock runs ahead would get an updatedAt *older* than the
-   row already carries, so mergeItem's "newest updatedAt wins" would keep
-   silently discarding this machine's own edit forever. nextUpdatedAt (and
-   every mutation below) instead always lands at least one past whatever
-   updatedAt the row already has, never actually going backwards — while
-   other timestamp fields (reviewedAt, archivedAt, deletedAt, log ts) keep
-   recording the real wall-clock time unchanged. */
 
 test('nextUpdatedAt is the wall clock when it is already ahead of the previous updatedAt', () => {
   assert.equal(D.nextUpdatedAt(100, 500), 500);
@@ -772,13 +758,6 @@ test('mergeState: a newer tombstone beats an older live copy — export/import r
 });
 
 test('mergeState: a v2-era archive + later ping beats an older live backup once both are migrated', () => {
-  // Reproduces the review finding: under v2, archiving and pinging an item
-  // did not bump updatedAt. Without migrate() catching updatedAt up, this
-  // v2-archived-then-pinged row (updatedAt 100, reviewedAt 250, archivedAt
-  // 300) ties an older backup where the same item is still live (updatedAt
-  // 100), and the text tie-break could pick the older, live copy — undoing
-  // both the archive and the newer ping. This is exactly the first import
-  // of an old backup, or the Phase 5 first sync of two v2 machines.
   const currentV2 = {
     id: 'i1',
     name: 'Legacy Co',
@@ -900,14 +879,45 @@ test('buildReportHTML excludes tombstones', () => {
   assert.ok(!html.includes('GHOST'));
 });
 
-test('blipXY is deterministic and scales radius by status ring', () => {
-  const active = D.blipXY({ id: 'same', status: 'active' });
-  const again = D.blipXY({ id: 'same', status: 'active' });
-  const dormant = D.blipXY({ id: 'same', status: 'dormant' });
-  assert.deepEqual(active, again);
-  const distA = Math.hypot(active.x - D.CX, active.y - D.CY);
-  const distD = Math.hypot(dormant.x - D.CX, dormant.y - D.CY);
-  assert.ok(distD > distA, 'dormant sits on an outer ring');
+test('blipXY is deterministic and moves lower-priority, later reviews outward', () => {
+  const due = D.localDate(NOW);
+  const later = '2026-09-13';
+  const urgent = D.blipXY(
+    { id: 'same', priority: 'critical', nextReviewOn: due, reviewIntervalDays: 14 },
+    NOW
+  );
+  const again = D.blipXY(
+    { id: 'same', priority: 'critical', nextReviewOn: due, reviewIntervalDays: 14 },
+    NOW
+  );
+  const distant = D.blipXY(
+    { id: 'same', priority: 'low', nextReviewOn: later, reviewIntervalDays: 14 },
+    NOW
+  );
+  assert.deepEqual(urgent, again);
+  const urgentRadius = Math.hypot(urgent.x - D.CX, urgent.y - D.CY);
+  const distantRadius = Math.hypot(distant.x - D.CX, distant.y - D.CY);
+  assert.ok(distantRadius > urgentRadius, 'lower priority and later review sit farther out');
+  assert.equal(urgent.daysUntilReview, 0);
+  assert.equal(distant.daysUntilReview, 90);
+});
+
+test('blipXY lets priority and review timing independently affect distance', () => {
+  const due = D.localDate(NOW);
+  const soonHigh = D.blipXY(
+    { id: 'same', priority: 'high', nextReviewOn: due, reviewIntervalDays: 14 },
+    NOW
+  );
+  const soonLow = D.blipXY(
+    { id: 'same', priority: 'low', nextReviewOn: due, reviewIntervalDays: 14 },
+    NOW
+  );
+  const manualHigh = D.blipXY({ id: 'same', priority: 'high', reviewIntervalDays: null }, NOW);
+  assert.ok(soonLow.radiusFraction > soonHigh.radiusFraction, 'lower priority moves outward');
+  assert.ok(
+    manualHigh.radiusFraction > soonHigh.radiusFraction,
+    'later/manual review moves outward'
+  );
 });
 
 test('uid returns an RFC 4122 v4 UUID', () => {
@@ -1108,9 +1118,6 @@ test('mergeDiskIntoStore: falls back to the store’s own lastExport when the di
 });
 
 test('mergeDiskIntoStore: never rolls lastExport backwards — takes whichever side is newer', () => {
-  // A reload landing after an export set Store.lastExport in memory but
-  // before that save reached disk must not roll it back (and bring back
-  // the "back up your data" nudge) — found in review.
   const merged = D.mergeDiskIntoStore(
     { items: [], arch: [], lastExport: 5 },
     { items: [], arch: [], lastExport: 42 }

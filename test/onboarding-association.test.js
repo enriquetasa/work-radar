@@ -102,7 +102,7 @@ function loadRenderer({ onboardingState, profileAssociate, profileUseSeparate } 
     WorkRadarOnboardingView: onboardingView,
   };
   const source = fs.readFileSync(path.join(__dirname, '..', 'renderer', 'app.js'), 'utf8');
-  const beforeBoot = source.slice(0, source.indexOf('/* ---------- Boot ---------- */'));
+  const beforeBoot = source.slice(0, source.indexOf('// Boot'));
   vm.runInNewContext(`${beforeBoot}\nthis.__Onboarding = Onboarding; this.__Auth = Auth;`, context);
   return { onboarding: context.__Onboarding, auth: context.__Auth, elements, calls };
 }

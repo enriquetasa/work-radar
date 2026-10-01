@@ -1,23 +1,14 @@
 'use strict';
-/* ============================================================
-   WORK RADAR — renderer
-   Persistence: Electron file IO via window.radarAPI when present,
-   otherwise falls back to localStorage (so this still runs in a
-   plain browser). All disk access in Electron is in the main process.
-   ============================================================ */
-
-// Pure domain logic lives in domain.js (loaded as window.WorkRadarDomain),
-// so it can be unit-tested under node:test without a DOM.
 const D = window.WorkRadarDomain;
 const AV = window.WorkRadarAuthView;
 const SV = window.WorkRadarSyncView;
 const { PC, SC, uid, fdt, stripTombstones } = D;
 const HAS_API = typeof window !== 'undefined' && !!window.radarAPI;
 
-/* ---------- Persistence adapter ---------- */
+// Persistence
 const Persist = {
   async load() {
-    if (HAS_API) return await window.radarAPI.load();
+    if (HAS_API) return window.radarAPI.load();
     try {
       return JSON.parse(localStorage.getItem('workradar') || 'null');
     } catch (e) {
@@ -43,7 +34,7 @@ const Persist = {
   },
 };
 
-/* ---------- Store ---------- */
+// Store
 const Store = {
   items: [],
   arch: [],
@@ -66,7 +57,7 @@ const Store = {
   async load() {
     const d = await Persist.load();
     if (!d) {
-      // First run in browser mode: attempt legacy v1 keys.
+      // Try legacy browser keys on first run.
       if (!HAS_API) {
         try {
           this.items = D.migrate(JSON.parse(localStorage.getItem('wr-items') || '[]'));
@@ -84,9 +75,7 @@ const Store = {
     if (Number.isFinite(Number(d.schema)) && Number(d.schema) > D.SCHEMA) {
       throw new Error('This data file was created by a newer version of Work Radar.');
     }
-    // Merge against an empty state so any id that ended up in both items
-    // and arch (possible under the old mergeById import, which this
-    // replaces) collapses to one record instead of showing up twice.
+    // Collapse records that legacy imports placed in both lists.
     const deduped = D.mergeState(
       {
         items: D.migrate(Array.isArray(d.items) ? d.items : []),
@@ -110,15 +99,13 @@ const Store = {
   },
 };
 
-/* ---------- Serialized saves ---------- */
+// Save queue
 let saveQueue = Promise.resolve();
 let saveGeneration = 0;
 function invalidatePendingSaves() {
   saveGeneration += 1;
 }
-// Set when Store.load() fails at boot (see boot() below). Store.items/arch
-// then stay at their empty initial value, so saving would overwrite the
-// user's real data file with nothing; refuse until the app is restarted.
+// A failed load disables saves to prevent overwriting unreadable data.
 let loadFailed = false;
 function mergeSavedMetadata(data) {
   if (!data) return;
@@ -178,9 +165,8 @@ async function reloadRendererProfile() {
   render();
 }
 
-/* ---------- Actions ---------- */
+// Actions
 const Actions = {
-  // Keep timestamp rules in the tested domain layer.
   add(v) {
     Store.items.push(D.createItem(v, Date.now(), uid));
     commit({ historyAction: 'create' });
@@ -189,10 +175,6 @@ const Actions = {
     Store.items = Store.items.map((i) => (i.id === id ? D.updateItem(i, v, Date.now()) : i));
     commit({ historyAction: 'edit' });
   },
-  // Every mutation below goes through a pure domain.js function so the
-  // updatedAt bump (and, for purge, the tombstone) is unit-tested rather
-  // than only reachable through the DOM — see the "Item mutations" section
-  // of domain.js.
   review(id, nextDate) {
     const now = Date.now();
     Store.items = Store.items.map((i) => (i.id === id ? D.reviewItem(i, now, nextDate) : i));
@@ -219,10 +201,7 @@ const Actions = {
     Store.arch = Store.arch.filter((i) => i.id !== id);
     commit({ historyAction: 'restore' });
   },
-  // PURGE never removes the record — it marks it a tombstone (deletedAt).
-  // Tombstones stay in the data file (so a later merge still sees the
-  // deletion — see domain.js mergeState) but are hidden everywhere in the
-  // UI via D.stripTombstones / D.selectVisible.
+  // Keep tombstones for sync while hiding them from the UI.
   purge(id) {
     const now = Date.now();
     Store.arch = Store.arch.map((i) => (i.id === id ? D.purgeItem(i, now) : i));
@@ -308,7 +287,6 @@ const Actions = {
         if (res && res.error) alert('PDF EXPORT FAILED — ' + res.error);
       }
     } else {
-      // Browser fallback: open in a new tab and let the user print to PDF.
       const w = window.open();
       w.document.write(html);
       w.document.close();
@@ -326,9 +304,6 @@ const Actions = {
       alert('NO PROJECTS OR CATEGORY SETTINGS FOUND IN FILE.');
       return false;
     }
-    // Count live/archived contacts, not tombstones — a file holding only
-    // purged records should say "0 archived", not count them as archived
-    // contacts (see D.stripTombstones).
     const liveCount = D.stripTombstones(inItems).length;
     const archCount = D.stripTombstones(inArch).length;
     const deletions = inItems.length - liveCount + (inArch.length - archCount);
@@ -389,15 +364,7 @@ const Actions = {
   },
 };
 
-/* ---------- Auth (sync sign-in — see docs/supabase-sync-plan.md) ----------
-   Entirely optional: authStatus() reports { configured: false } when the
-   main process has no Supabase URL/key configured, and this stays fully
-   inert in that case — no UI is ever unhidden. Flow: email input →
-   "CHECK YOUR INBOX" (optimistic, set the instant the form is submitted)
-   → signed-in state, driven by the 'auth:stateChanged' push from main
-   once exchangeCodeForSession actually completes. Sign Out lives in the
-   Radar menu, not here (main.js only adds that menu item when sync is
-   configured). */
+// Authentication
 const Auth = {
   _listenersBound: false,
   lastSignedIn: false,
@@ -986,20 +953,7 @@ const Briefing = {
     document.getElementById('briefing-form').onsubmit = (event) => this.save(event);
   },
 };
-/* ---------- Sync-config key prompt (see docs/supabase-sync-plan.md's
-   notes on the built-in default project URL + first-run key prompt)
-   ----------
-   Shown once at startup, only when main reports no publishable key was
-   found from any source — syncConfigNeedsKey() already folds in "env
-   vars fully configure it", so this never shows in that case. Saving
-   hands the trimmed key to main for validation (sync/key-validation.js)
-   and persistence; main never echoes the key back, and this never logs
-   it either. "NOT NOW" just hides the overlay for this run — nothing is
-   persisted, so the prompt returns next launch. On a successful save,
-   Auth.init() is re-run: its own early return on `!status.configured`
-   is exactly why it did nothing the first time boot() called it, so
-   this is the only place that ever lets it proceed for a session that
-   started out unconfigured — no app restart needed. */
+// Sync key prompt
 const SyncConfigPrompt = {
   isOpen() {
     const overlay = document.getElementById('sync-key-overlay');
@@ -1007,9 +961,7 @@ const SyncConfigPrompt = {
   },
   async init() {
     if (!HAS_API || !window.radarAPI.syncConfigNeedsKey) return;
-    // A fresh install must choose local-only or begin invited sign-in before
-    // seeing technical sync configuration. Local-only mode keeps the app
-    // quiet until the user explicitly chooses sign-in later.
+    // Finish onboarding before showing sync configuration.
     if (window.radarAPI.onboardingGet) {
       try {
         const onboarding = await window.radarAPI.onboardingGet();
@@ -1028,7 +980,7 @@ const SyncConfigPrompt = {
     }
     if (!needsKey) return;
     document.getElementById('sync-key-overlay').hidden = false;
-    // aria-modal does not prevent focus or clicks behind the overlay.
+    // The modal also needs inert to block background interaction.
     document.getElementById('app').inert = true;
     document.getElementById('sync-key-form').addEventListener('submit', (e) => {
       e.preventDefault();
@@ -1045,10 +997,7 @@ const SyncConfigPrompt = {
     const err = document.getElementById('sync-key-error');
     err.textContent = message;
     err.hidden = false;
-    // Send focus back to the input so a screen-reader user (and anyone
-    // tabbing through) lands right back where they need to fix it,
-    // rather than wherever focus happened to be (e.g. the disabled Save
-    // button — see save() below).
+    // Return focus to the invalid field.
     document.getElementById('sync-key-input').focus();
   },
   async save() {
@@ -1081,18 +1030,7 @@ const SyncConfigPrompt = {
   },
 };
 
-/* ---------- Sync status (Phases 4-5 — see docs/supabase-sync-plan.md)
-   ----------
-   Mostly push-only from main: the indicator starts hidden and stays that
-   way until main pushes a real state over 'sync:stateChanged' — which it
-   only does once sync is configured AND the user is signed in (main hides
-   it again with `{ state: null }` on sign-out). init() below also asks
-   for the current status once via syncStatus(), the same way Auth.init()
-   calls authStatus() — see that call's own comment for why the push alone
-   isn't enough. `onSyncReload`
-   is main telling the renderer "I just merged in a pull — your in-memory
-   Store is now behind the data file", so it reloads and re-renders
-   rather than trusting its own state. */
+// Sync status
 const Sync = {
   init() {
     if (!HAS_API || !window.radarAPI.onSyncStateChanged) return;
@@ -1100,12 +1038,7 @@ const Sync = {
     if (window.radarAPI.onSyncReload) {
       window.radarAPI.onSyncReload(() => this.reload());
     }
-    // Ask for the current status once, the same way Auth.init() calls
-    // authStatus() — the push alone can otherwise reach nobody (main can
-    // start the engine and push a status before this listener above is
-    // even registered, and identical pushes are deduped), leaving the
-    // indicator stuck hidden for the rest of the session (found in
-    // review) — same again after a window reload.
+    // Recover status events emitted before the renderer subscribed.
     if (window.radarAPI.syncStatus) {
       window.radarAPI
         .syncStatus()
@@ -1126,8 +1059,7 @@ const Sync = {
   },
   async reload() {
     try {
-      // Merge same-profile data so edits still waiting to save survive a disk reload.
-      // Switching profiles replaces the store to keep account data separate.
+      // Merge the same profile; replace state when switching profiles.
       const fromDisk = await Persist.load();
       if (
         fromDisk &&
@@ -1176,7 +1108,7 @@ const Sync = {
   },
 };
 
-/* ---------- Selectors ---------- */
+// Selectors
 function recoveryItems() {
   const current = new Map(
     [...Store.items, ...Store.arch].filter((item) => item.deletedAt).map((item) => [item.id, item])
@@ -1195,7 +1127,7 @@ function visibleList() {
   return Store.ui.view === 'recovery' ? recoveryItems() : D.selectVisible(Store);
 }
 
-/* ---------- Render ---------- */
+// Rendering
 function node(tag, className, text) {
   const el = document.createElement(tag);
   if (className) el.className = className;
@@ -1220,6 +1152,95 @@ function dateAfter(days) {
   const date = new Date();
   date.setDate(date.getDate() + days);
   return D.localDate(date.getTime());
+}
+const RADAR_CATEGORY_COLORS = [
+  '#00e676',
+  '#26c6da',
+  '#ff9100',
+  '#ab47bc',
+  '#ffee58',
+  '#42a5f5',
+  '#ec407a',
+  '#66bb6a',
+  '#ff7043',
+  '#7e57c2',
+  '#26a69a',
+  '#d4e157',
+];
+const RADAR_UNCATEGORIZED_COLOR = '#78909c';
+
+function radarCategoryColors(items) {
+  const categories = D.normalizeCategories(items.map((item) => item.category));
+  return new Map(
+    categories.map((category, index) => [
+      category,
+      RADAR_CATEGORY_COLORS[index % RADAR_CATEGORY_COLORS.length],
+    ])
+  );
+}
+
+function selectProject(item) {
+  Store.ui.sel = Store.ui.sel === item.id ? null : item.id;
+  Store.ui.showForm = false;
+  render();
+  if (Store.ui.sel) document.getElementById('detail-close').focus();
+}
+
+function renderRadar() {
+  const items = stripTombstones(Store.items);
+  const blips = document.getElementById('radar-blips');
+  const legend = document.getElementById('radar-legend');
+  const layout = document.getElementById('radar-layout');
+  const empty = document.getElementById('radar-empty');
+  blips.replaceChildren();
+  legend.replaceChildren();
+  layout.hidden = items.length === 0;
+  empty.hidden = items.length > 0;
+  if (!items.length) return;
+
+  const colors = radarCategoryColors(items);
+  const colorsByKey = new Map(
+    [...colors.entries()].map(([category, color]) => [category.toLowerCase(), color])
+  );
+  const categoryName = (item) => (typeof item.category === 'string' ? item.category.trim() : '');
+  const categoryLabel = (item) => categoryName(item) || 'No category';
+  const categoryColor = (item) =>
+    categoryName(item)
+      ? colorsByKey.get(categoryName(item).toLowerCase()) || RADAR_UNCATEGORIZED_COLOR
+      : RADAR_UNCATEGORIZED_COLOR;
+
+  items.forEach((item) => {
+    const point = D.blipXY(item);
+    const review = D.reviewDate(item);
+    const reviewText = review ? 'Review ' + dateLabel(review) : 'No review scheduled';
+    const blip = node('button', 'radar-blip' + (Store.ui.sel === item.id ? ' selected' : ''));
+    blip.classList.toggle('label-left', point.x > D.CX);
+    blip.type = 'button';
+    blip.style.left = (point.x / (D.CX * 2)) * 100 + '%';
+    blip.style.top = (point.y / (D.CY * 2)) * 100 + '%';
+    blip.style.setProperty('--category-color', categoryColor(item));
+    blip.setAttribute(
+      'aria-label',
+      `${item.name}, ${item.priority} priority, ${categoryLabel(item)}, ${reviewText}`
+    );
+    blip.setAttribute('aria-pressed', String(Store.ui.sel === item.id));
+    blip.title = `${item.name} · ${item.priority} · ${categoryLabel(item)} · ${reviewText}`;
+    blip.addEventListener('click', () => selectProject(item));
+    blip.append(node('span', 'radar-blip-core'), node('span', 'radar-blip-label', item.name));
+    blips.append(blip);
+  });
+
+  legend.append(node('h2', 'eyebrow', 'Categories'));
+  const legendEntries = [...colors.entries()];
+  if (items.some((item) => !categoryName(item)))
+    legendEntries.push(['No category', RADAR_UNCATEGORIZED_COLOR]);
+  legendEntries.forEach(([category, color]) => {
+    const row = node('div', 'radar-legend-row');
+    const swatch = node('span', 'radar-legend-swatch');
+    swatch.style.background = color;
+    row.append(swatch, node('span', '', category));
+    legend.append(row);
+  });
 }
 function renderDetail() {
   const panel = document.getElementById('detail-panel');
@@ -1611,12 +1632,7 @@ function renderList() {
     if (Store.ui.sel === item.id) row.style.borderLeftColor = PC[item.priority];
     row.setAttribute('aria-expanded', String(Store.ui.sel === item.id));
     row.setAttribute('aria-controls', 'detail-panel');
-    row.addEventListener('click', () => {
-      Store.ui.sel = Store.ui.sel === item.id ? null : item.id;
-      Store.ui.showForm = false;
-      render();
-      if (Store.ui.sel) document.getElementById('detail-close').focus();
-    });
+    row.addEventListener('click', () => selectProject(item));
     const main = node('div', 'contact-main');
     const left = node('div', 'contact-left');
     const dot = node('span', 'contact-dot');
@@ -1656,6 +1672,7 @@ function renderList() {
 }
 function render() {
   const today = Store.ui.view === 'today';
+  const radar = Store.ui.view === 'radar';
   const archive = Store.ui.view === 'archive';
   const recovery = Store.ui.view === 'recovery';
   document.getElementById('body').classList.toggle('editing-project', Store.ui.showForm);
@@ -1667,24 +1684,28 @@ function render() {
     t.classList.toggle('active', active);
     t.setAttribute('aria-pressed', String(active));
   });
-  document.getElementById('all-controls').hidden = today || recovery;
+  document.getElementById('all-controls').hidden = today || radar || recovery;
   document.getElementById('filter').hidden = archive || recovery;
-  document.getElementById('archive-btn').hidden = today || recovery;
+  document.getElementById('archive-btn').hidden = today || radar || recovery;
   document.getElementById('archive-btn').textContent = archive ? '← All projects' : 'Archive';
   document.getElementById('view-title').textContent = today
     ? "Today's radar"
-    : recovery
-      ? 'Recovery'
-      : archive
-        ? 'Archive'
-        : 'All projects';
+    : radar
+      ? 'Radar'
+      : recovery
+        ? 'Recovery'
+        : archive
+          ? 'Archive'
+          : 'All projects';
   document.getElementById('view-subtitle').textContent = today
     ? 'What needs your attention, and why.'
-    : recovery
-      ? 'Deleted projects with retained history can be restored here.'
-      : archive
-        ? 'Finished for now. Restore a project whenever you need it.'
-        : 'Everything you’re keeping in sight.';
+    : radar
+      ? 'Priority and review timing, seen at a glance.'
+      : recovery
+        ? 'Deleted projects with retained history can be restored here.'
+        : archive
+          ? 'Finished for now. Restore a project whenever you need it.'
+          : 'Everything you’re keeping in sight.';
   document.getElementById('view-date').textContent = new Date().toLocaleDateString(undefined, {
     weekday: 'short',
     month: 'short',
@@ -1696,7 +1717,10 @@ function render() {
       (Store.ui.view === 'all' ? 'E edit · ' : '') +
       'R reviewed · Esc close';
   document.getElementById('form-panel').hidden = !Store.ui.showForm;
-  renderList();
+  document.getElementById('list').hidden = radar;
+  document.getElementById('radar-view').hidden = !radar;
+  if (radar) renderRadar();
+  else renderList();
   renderDetail();
 }
 function switchView(view) {
@@ -1715,7 +1739,7 @@ function focusSearch() {
   document.getElementById('search').focus();
 }
 
-/* ---------- Form ---------- */
+// Project form
 function setSeg(group, val) {
   document.querySelectorAll('[data-group="' + group + '"]').forEach((b) => {
     const on = b.dataset.val === val;
@@ -1846,7 +1870,7 @@ function saveForm() {
   closeForm();
 }
 
-/* ---------- Wiring ---------- */
+// Event wiring
 function wire() {
   document.getElementById('settings-open').addEventListener('click', () => Settings.open());
   document.getElementById('category-manage').addEventListener('click', () => Settings.open());
@@ -1949,7 +1973,7 @@ function wire() {
 
   document.addEventListener('keydown', (e) => {
     if (document.getElementById('settings-dialog').open) return;
-    // Block app shortcuts while the modal is open; Escape dismisses it.
+    // Disable app shortcuts while the modal is open.
     if (SyncConfigPrompt.isOpen()) {
       if (e.key === 'Escape') {
         e.preventDefault();
@@ -1991,7 +2015,6 @@ function wire() {
     else if ((e.key === 'a' || e.key === 'A') && sel && !sel.archivedAt) Actions.archive(sel.id);
   });
 
-  // Native menu commands (Electron)
   if (HAS_API && window.radarAPI.onMenu) {
     window.radarAPI.onMenu((action) => {
       if (document.getElementById('settings-dialog').open) return;
@@ -2018,7 +2041,8 @@ function wire() {
       month: 'short',
       day: 'numeric',
     });
-    renderList(); // Keep any draft form, review choice, or activity update intact.
+    if (Store.ui.view === 'radar') renderRadar();
+    else renderList(); // Keep any draft form, review choice, or activity update intact.
     renderedDay = D.localDate();
   };
   window.addEventListener('focus', refreshAttention);
@@ -2027,7 +2051,7 @@ function wire() {
   }, 30000);
 }
 
-/* ---------- Boot ---------- */
+// Boot
 (async function boot() {
   wire();
   await Auth.init().catch((err) => console.error('Auth.init failed', err));
@@ -2037,10 +2061,7 @@ function wire() {
   try {
     await Store.load();
   } catch (err) {
-    // Store.items/arch are still their empty initial value here. Without
-    // this guard the error is silently swallowed (nothing logs it, render()
-    // never runs so the UI looks stuck), and the next add/commit would save
-    // that empty Store over the user's data file — a data-loss path.
+    // Never save after a failed load; the in-memory store may be incomplete.
     loadFailed = true;
     console.error('Store.load failed — refusing to save until the app is restarted', err);
     alert(

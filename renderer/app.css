@@ -74,19 +74,6 @@ select {
   animation: blink 1.2s step-end infinite;
 }
 
-.c-crit {
-  color: #f44336;
-}
-.c-high {
-  color: #ff9100;
-}
-.c-green {
-  color: #00e676;
-}
-.c-dorm {
-  color: #546e7a;
-}
-
 #app {
   display: flex;
   flex-direction: column;
@@ -104,12 +91,6 @@ select {
   flex-shrink: 0;
   gap: 16px;
   flex-wrap: wrap;
-}
-#header-left {
-  display: flex;
-  align-items: center;
-  gap: 16px;
-  min-width: 0;
 }
 #header-title {
   font-size: 13px;
@@ -155,12 +136,7 @@ select {
   color: #ff9100;
 }
 
-/* Sync engine status (Phases 4-5, see docs/supabase-sync-plan.md) —
-   same .auth-status look as the auth panel it lives next to, colour
-   keyed to the same palette domain.js uses for status/priority
-   (SYNCED=active green, PENDING=watch amber, OFFLINE=dormant grey,
-   ERROR=critical red). Hidden by default; app.js only unhides it once
-   main pushes a real state (never while signed out or unconfigured). */
+/* Sync status */
 #sync-status.sync-synced {
   color: #00e676;
 }
@@ -174,16 +150,7 @@ select {
   color: #f44336;
 }
 
-/* Startup "add your key" prompt (see docs/supabase-sync-plan.md's notes
-   on the built-in default project URL + first-run publishable-key
-   prompt). Shown before sync is "configured" at all — there's no
-   #auth-panel to live inside yet at that point — so this is a
-   full-viewport overlay rather than a header element. Same
-   [hidden]-override need as #auth-panel/#auth-form above: the bare rule
-   below sets display:flex, which beats the browser's built-in
-   `[hidden] { display: none }` (see that rule's own comment), so
-   #sync-key-overlay[hidden] has to say display:none explicitly too —
-   covered by test/renderer-css.test.js. */
+/* Sync key prompt */
 #sync-key-overlay {
   position: fixed;
   inset: 0;
@@ -260,11 +227,6 @@ select {
   color: #00e676;
   border-bottom: 1px solid #00e676;
 }
-#search-wrap {
-  flex: 1;
-  min-width: 120px;
-  max-width: 320px;
-}
 #search {
   font-size: 9px;
   letter-spacing: 1px;
@@ -273,25 +235,6 @@ select {
 }
 #search:focus {
   border-color: #2e7d4a;
-}
-#filters {
-  display: flex;
-  gap: 3px;
-  flex-shrink: 0;
-}
-.filter-btn {
-  background: none;
-  border: 1px solid #0f2816;
-  padding: 3px 7px;
-  font-size: 7px;
-  letter-spacing: 1px;
-  color: #1a4d2e;
-  white-space: nowrap;
-}
-.filter-btn.active {
-  background: #1a5c2c20;
-  border-color: #2e7d4a;
-  color: #00e676;
 }
 #sort {
   width: auto;
@@ -370,17 +313,6 @@ select {
   color: #f44336;
   border-color: #f4433640;
 }
-.dact.muted {
-  color: #546e7a;
-  border-color: #546e7a;
-}
-.dact.close-btn {
-  background: none;
-  border: none;
-  padding: 2px 6px;
-  font-size: 12px;
-  color: #1a4d2e;
-}
 #detail-notes {
   font-size: 9px;
   color: #2e7d4a;
@@ -400,12 +332,6 @@ select {
   margin-top: 8px;
   max-height: 108px;
   overflow-y: auto;
-}
-.detail-log-header {
-  font-size: 7px;
-  letter-spacing: 2px;
-  color: #1a4d2e;
-  margin-bottom: 4px;
 }
 .detail-log-entry {
   display: flex;
@@ -497,6 +423,186 @@ select {
   overflow-y: auto;
   min-height: 0;
 }
+#radar-view {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 12px 16px 16px;
+}
+#radar-guide {
+  color: #2e7d4a;
+  font-size: 7px;
+  letter-spacing: 1px;
+  line-height: 1.5;
+  margin-bottom: 10px;
+  text-align: center;
+  text-transform: uppercase;
+}
+#radar-layout {
+  display: grid;
+  grid-template-columns: minmax(260px, 1fr) minmax(120px, 180px);
+  align-items: start;
+  gap: 20px;
+  max-width: 820px;
+  margin: 0 auto;
+}
+#radar-stage {
+  position: relative;
+  width: min(100%, 620px);
+  aspect-ratio: 1;
+  justify-self: center;
+  border: 1px solid #1a5c2c;
+  border-radius: 50%;
+  overflow: visible;
+  background: radial-gradient(circle, #062011 0%, #020e07 52%, #010805 100%);
+}
+.radar-ring {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  border: 1px solid #164524;
+  border-radius: 50%;
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+}
+.radar-ring-outer {
+  width: 75%;
+  height: 75%;
+}
+.radar-ring-middle {
+  width: 50%;
+  height: 50%;
+}
+.radar-ring-inner {
+  width: 25%;
+  height: 25%;
+}
+.radar-axis {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  background: #0f321a;
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+}
+.radar-axis-horizontal {
+  width: 100%;
+  height: 1px;
+}
+.radar-axis-vertical {
+  width: 1px;
+  height: 100%;
+}
+.radar-center {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  color: #2e7d4a;
+  background: #020e07;
+  padding: 2px 4px;
+  font-size: 6px;
+  letter-spacing: 1px;
+  pointer-events: none;
+}
+#radar-blips {
+  position: absolute;
+  inset: 0;
+}
+.radar-blip {
+  position: absolute;
+  width: 14px;
+  height: 14px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  transform: translate(-50%, -50%);
+  z-index: 2;
+}
+.radar-blip-core {
+  position: absolute;
+  inset: 3px;
+  border: 1px solid #010805;
+  background: var(--category-color);
+  box-shadow: 0 0 7px var(--category-color);
+}
+.radar-blip:hover,
+.radar-blip:focus-visible,
+.radar-blip.selected {
+  z-index: 4;
+}
+.radar-blip:hover .radar-blip-core,
+.radar-blip:focus-visible .radar-blip-core,
+.radar-blip.selected .radar-blip-core {
+  inset: 1px;
+  border-color: #e8fff0;
+}
+.radar-blip-label {
+  display: none;
+  position: absolute;
+  left: 14px;
+  top: -2px;
+  width: max-content;
+  max-width: 180px;
+  padding: 3px 5px;
+  border: 1px solid #1a5c2c;
+  background: #010805;
+  color: #69f0ae;
+  font-size: 7px;
+  letter-spacing: 0.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  pointer-events: none;
+}
+.radar-blip.label-left .radar-blip-label {
+  left: auto;
+  right: 14px;
+}
+.radar-blip:hover .radar-blip-label,
+.radar-blip:focus-visible .radar-blip-label,
+.radar-blip.selected .radar-blip-label {
+  display: block;
+}
+#radar-legend {
+  border: 1px solid #0f2816;
+  padding: 10px;
+  min-width: 0;
+}
+#radar-legend h2 {
+  letter-spacing: 1.5px;
+  margin-bottom: 8px;
+}
+.radar-legend-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 3px 0;
+  color: #2e7d4a;
+  font-size: 7px;
+  overflow-wrap: anywhere;
+}
+.radar-legend-swatch {
+  width: 7px;
+  height: 7px;
+  flex: 0 0 7px;
+}
+#radar-empty {
+  padding: 48px 20px;
+  text-align: center;
+  color: #152e1a;
+}
+#radar-empty h2 {
+  margin: 8px 0;
+  color: #2e7d4a;
+  font-size: 9px;
+  letter-spacing: 2px;
+  text-transform: uppercase;
+}
+#radar-empty p {
+  font-size: 8px;
+  letter-spacing: 1px;
+}
 #empty-msg {
   padding: 48px 20px;
   text-align: center;
@@ -546,18 +652,6 @@ select {
   flex-shrink: 0;
   align-items: center;
 }
-.stale-tag {
-  color: #ff9100;
-}
-.contact-notes {
-  margin-top: 3px;
-  font-size: 8px;
-  color: #1a4d2e;
-  padding-left: 13px;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
 
 #footer {
   border-top: 1px solid #1a5c2c;
@@ -591,8 +685,6 @@ select {
 #import-file {
 }
 
-/* New views and scheduling controls use the original terminal palette,
-   square edges, type scale, and compact spacing above. */
 button,
 summary {
   text-transform: uppercase;
@@ -933,9 +1025,23 @@ label {
   #inspector {
     max-height: 70%;
   }
+  #radar-view {
+    padding: 10px;
+  }
+  #radar-layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  #radar-legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px 14px;
+  }
+  #radar-legend h2 {
+    flex-basis: 100%;
+  }
 }
 
-/* Project forms use the full workspace in every view. */
+/* Full-workspace editor */
 .contact-list-entry {
   display: flex;
   align-items: stretch;
@@ -1210,7 +1316,7 @@ label {
   color: #546e7a;
 }
 
-/* Category settings use the same terminal palette and controls as project forms. */
+/* Category settings */
 .category-label {
   display: flex;
   align-items: center;

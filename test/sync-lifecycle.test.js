@@ -1,13 +1,4 @@
 'use strict';
-/* ============================================================
-   WORK RADAR — unit tests: sync lifecycle (Phase 6 fix)
-   Pins the transition logic main.js's authService.onChange handler used
-   to run inline — extracted to sync/sync-lifecycle.js (found in review)
-   so it's testable without Electron. Fakes the engine/realtime
-   dependencies the same way test/sync-engine.test.js and
-   test/sync-realtime.test.js fake theirs.
-   ============================================================ */
-
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 
@@ -58,11 +49,6 @@ test('a signed-in status starts the engine and subscribes realtime with the stat
   assert.equal(lifecycle.isRunning(), true);
 });
 
-// The bug: main.js used to resolve the userId via its own async
-// client.auth.getSession() call, racing a fast sign-out. Now the userId
-// travels with the same synchronous status push as signedIn, so a
-// signedIn immediately followed by a signedOut (no async gap to fall
-// into) must leave no subscription open at all.
 test('signedIn immediately followed by signedOut leaves no channel subscribed (no async gap to race)', () => {
   const engine = fakeEngine();
   const realtime = fakeRealtime();
@@ -77,9 +63,6 @@ test('signedIn immediately followed by signedOut leaves no channel subscribed (n
   assert.equal(lifecycle.isRunning(), false);
 });
 
-// A TOKEN_REFRESHED event still reports signedIn:true but must not tear
-// down and rebuild the realtime channel — see docs/supabase-sync-plan.md's
-// Phase 6 notes ("gated on the transition, not every auth event").
 test('a second signedIn event while already running (e.g. TOKEN_REFRESHED) does not re-subscribe', () => {
   const engine = fakeEngine();
   const realtime = fakeRealtime();
@@ -120,10 +103,6 @@ test('sign-out then sign-in as someone else subscribes the new userId', () => {
   assert.equal(lifecycle.isRunning(), true);
 });
 
-// Defensive only — toStatus() always fills userId off the same session
-// object that makes signedIn true, so this should never happen in
-// practice (found in review: this is what closes the old "getSession
-// errored/returned nothing" gap without any extra retry-gating logic).
 test('a signedIn status with no userId still starts the engine, but logs instead of subscribing', () => {
   const engine = fakeEngine();
   const realtime = fakeRealtime();
@@ -148,10 +127,6 @@ test('a signedIn status with no userId still starts the engine, but logs instead
   assert.ok(!('email' in (warnContext || {})), 'warn context must not carry an email key');
 });
 
-// A signed-in status whose userId differs from the one realtime is
-// subscribed for, pushed while sync is already running (e.g. a future
-// "switch account" flow), must re-subscribe rather than silently keep
-// the old user's channel (found in review).
 test('signedIn(user-1) followed by signedIn(user-2) while running re-subscribes to user-2', () => {
   const engine = fakeEngine();
   const realtime = fakeRealtime();
@@ -189,14 +164,6 @@ test('createSyncLifecycle requires an engine and a realtime sync', () => {
   assert.throws(() => createSyncLifecycle({ engine: fakeEngine() }), /realtime/);
 });
 
-// A throwing realtime.subscribe() (e.g. client.channel()/.on() itself
-// throws) must not leave the lifecycle believing it's subscribed —
-// otherwise the `wasRunning -> running` transition never fires again for
-// that userId and realtime stays off for the whole session with nothing
-// but a generic log line elsewhere (found in review:
-// `handleAuthStatus()` used to set `subscribedUserId` before calling
-// `subscribe()`, and the exception escaped up into `authService`'s
-// change-listener catch-all, which has no userId context).
 test('a subscribe() that throws is caught and logged with userId context, and does not mark the user as subscribed', () => {
   const engine = fakeEngine();
   const boom = new Error('channel() blew up');

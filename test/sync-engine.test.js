@@ -323,11 +323,6 @@ test('a stale_or_not_owned rejection leaves the item pending for the next cycle'
 });
 
 test('a stale_or_not_owned rejection whose remote row lookup finds nothing warns every cycle instead of retrying silently', async () => {
-  // docs/supabase-sync-plan.md's Phase 4-5 notes say this case "retries
-  // forever with a warn log every cycle" — found in review: the code
-  // used to just `continue` with no log line at all, so a row stuck this
-  // way (not owned by this user, or genuinely gone) retried forever with
-  // no trace in the logs.
   const dir = await tmpDir();
   const dataFilePath = path.join(dir, 'data.json');
   const syncStateFilePath = path.join(dir, 'sync-state.json');
@@ -464,10 +459,6 @@ test('a stale_or_not_owned rejection on content-identical rows resolves without 
     pushLogEntriesRpc: acceptAll(),
     pullItemsPage: emptyPage,
     pullLogEntriesPage: emptyPage,
-    // Same content, updated_at equal to local's — an already-accepted
-    // push being retried, or two machines' first sync overlapping on
-    // identical data. Must never be re-stamped: doing so would spread a
-    // content-free updatedAt bump to every machine (found in review).
     getItemById: async () => remoteRow('A', { updated_at: msToIso(100), name: 'same everywhere' }),
   });
 
@@ -709,10 +700,6 @@ test('a plain write outside recordLocalSave is still diffed into the outbox and 
     await engine.triggerNow(); // establishes an empty, already-synced baseline
     assert.deepEqual(pushedIds, []);
 
-    // A plain atomicWrite made outside the engine entirely — e.g.
-    // main.js's data:save handler writing directly while signed out, or
-    // before the session was restored (see docs/supabase-sync-plan.md's
-    // Phase 4-5 notes).
     await writeJsonFileAtomic(dataFilePath, {
       schema: 3,
       items: [item('OUTSIDE', { updatedAt: 999 })],
@@ -1168,9 +1155,6 @@ test('recordLocalSave schedules a debounced sync after a save', async () => {
   }
 });
 
-/* ---------- Review fixes: blocking issue 1 (migrate a still-schema-2
-   file before merging) ---------- */
-
 test('withDataFile migrates a still-on-disk schema-2 file before merging, so a legacy log entry does not duplicate', async () => {
   const dir = await tmpDir();
   const dataFilePath = path.join(dir, 'data.json');
@@ -1284,9 +1268,6 @@ test('a cycle pushes migrated log-entry ids even when the on-disk file is still 
   }
 });
 
-/* ---------- Review fixes: blocking issue 2 (never block a local save on
-   the network) ---------- */
-
 test('recordLocalSave writes the merged save to disk before getSession settles (never blocks a local save on the network)', async () => {
   const dir = await tmpDir();
   const dataFilePath = path.join(dir, 'data.json');
@@ -1341,8 +1322,6 @@ test('recordLocalSave writes the merged save to disk before getSession settles (
     engine.stop();
   }
 });
-
-/* ---------- Review fixes: non-blocking cleanups ---------- */
 
 test('recordLocalSave keeps an offline/error status instead of downgrading it to pending', async () => {
   const dir = await tmpDir();
@@ -1509,8 +1488,6 @@ test('re-pulling an already-merged row does not rewrite the data file or notify 
   }
 });
 
-/* ---------- Review fixes, round 2 ---------- */
-
 test('stop() then start() while a cycle is in flight does not lose the new session’s rerun', async () => {
   const dir = await tmpDir();
   const dataFilePath = path.join(dir, 'data.json');
@@ -1560,11 +1537,6 @@ test('stop() then start() while a cycle is in flight does not lose the new sessi
     await waitFor(() => pushCalls >= 1, 'the first push must have started');
     assert.equal(pullCalls, 0, 'the gated cycle must not have reached the pull stage yet');
 
-    // Sign-out then sign-in (or an account switch) landing while that
-    // cycle is still stuck — found in review: start()'s own triggerNow()
-    // call, arriving while cycleRunning is still true, used to be lost
-    // entirely once the in-flight cycle's stale `myGeneration` failed
-    // the old rerun-loop's generation check.
     engine.stop();
     engine.start();
     gate.release();
@@ -1739,18 +1711,6 @@ test('recordLocalSave still reports pending when the session read fails, instead
   }
 });
 
-/* ---------- Review round 3 fixes: two more data-loss races ---------- */
-
-// Shared by both variants below (found in review — round 4: the round 3
-// fix for this race only covered an unrelated pulled id, and missed the
-// routine case where the pull's lookback window echoes this machine's own
-// id back at it). Seeds A@1000 with an already-synced outbox, starts a
-// cycle whose items pull is paused, races a local edit of A in while it's
-// paused (recordLocalSave never blocks on the network, so its merge-and-
-// write reaches disk immediately — only its outbox bookkeeping, behind
-// getUserId, is gated), then lets the pull resolve to whatever
-// `pulledRows` returns and asserts the local edit survives in the outbox
-// and gets pushed on a later cycle.
 async function assertLocalSaveSurvivesConcurrentPull(pulledRows) {
   const dir = await tmpDir();
   const dataFilePath = path.join(dir, 'data.json');
@@ -1837,15 +1797,6 @@ async function assertLocalSaveSurvivesConcurrentPull(pulledRows) {
       'the local edit must already be on disk before the pull merge below runs'
     );
 
-    // Let the pull merge finish. Its own withDataFile call reads the disk
-    // state above (A already at 2000). Waiting on the sync-state file's
-    // own itemsCursor (rather than on some pulled row landing on disk, as
-    // round 3's version of this test did) works for both variants below —
-    // including the echo variant, where the pull can leave the data file
-    // completely untouched — because pullAll (see keyset.js) always
-    // returns a cursor once any row comes back, and the cursor is
-    // persisted in the same withUserState call as the snapshot patch this
-    // test is really waiting to observe.
     pullGate.release();
     for (;;) {
       const state = await readJsonFile(syncStateFilePath);
@@ -1894,14 +1845,6 @@ test('a local save concurrent with a pull merge is not dropped from the outbox f
 });
 
 test('a local save concurrent with a pull merge is not dropped from the outbox for good (echo of the edited id itself)', async () => {
-  // The routine case round 3's fix missed (found in review — round 4
-  // blocking issue): the lookback window (see keyset.js) re-pulls this
-  // machine's own recently-pushed copy of A — synced_at 1500, updatedAt
-  // 1000, an echo of the seed above — alongside a genuinely new remote
-  // item, so the pull's merge does change *something* and reaches the
-  // snapshot-patch branch at all. The echo loses the merge to the local
-  // edit outright (1000 < 2000), so A's on-disk value never moves — the
-  // bug was patching its outbox snapshot entry regardless.
   await assertLocalSaveSurvivesConcurrentPull([
     {
       id: 'A',
@@ -2116,15 +2059,6 @@ test('the periodic interval skips its own trigger while backoff is active, and r
 });
 
 test('recordLocalSave does not fail the save when only the outbox bookkeeping write fails', async () => {
-  // Found in review: recordLocalSave used to let a failure anywhere after
-  // the data-file write (getUserId(), or sync-state.json's own write)
-  // propagate out and fail the whole call, so data:save in main.js
-  // returned { ok: false } even though the edit was already safely on
-  // disk — misleading the renderer into thinking the save itself failed.
-  // Only a failure of the data write itself should do that; a bookkeeping
-  // failure (e.g. a disk-full sync-state.json) must be logged separately
-  // and otherwise swallowed, since the next cycle's own start-of-cycle
-  // diff (diffLocalChangesIntoOutbox) picks the change up regardless.
   const dir = await tmpDir();
   const dataFilePath = path.join(dir, 'data.json');
   const syncStateFilePath = path.join(dir, 'sync-state.json');

@@ -1,16 +1,4 @@
 'use strict';
-/* ============================================================
-   Covers sync/dispose-auth-attempt.js's disposeFailedAuthAttempt() — the
-   cleanup main.js's initSyncAndAuth() runs when a step after
-   buildAuthService() throws (buildSyncEngine/buildRealtimeSync/
-   createSyncLifecycle/authService.onChange). Found in review:
-   buildAuthService() already leaves a live, subscribed auth service and
-   a supabase-js client with its own auto-refresh ticker running in this
-   process — left alone, a later successful retry builds a *second*
-   client/service pair, and two independently auto-refreshing clients
-   rotating the same refresh token can get the session revoked entirely.
-   ============================================================ */
-
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 

@@ -88,9 +88,6 @@ test('removeItem on a key that was never set is a harmless no-op', async () => {
   assert.equal(fs.existsSync(filePath), false, 'must not create a file just to remove nothing');
 });
 
-// A no-op logger so this doesn't print a WARNING line to stdout during
-// `npm test` (found in review — see the injected-logger test below for
-// why that's now possible).
 const silentLog = { debug() {}, info() {}, warn() {}, error() {}, critical() {} };
 
 test('a corrupt/undecryptable file is treated as empty, not thrown', async () => {
@@ -105,11 +102,6 @@ test('a corrupt/undecryptable file is treated as empty, not thrown', async () =>
   assert.equal(await storage.getItem('sb-session'), null);
 });
 
-// Found in review: this module used the module-level logger directly,
-// unlike config.js/callback-server.js/auth-service.js, which all accept an
-// injected `log` — so a test exercising the warn path always printed to
-// stdout regardless of what it passed in. Asserts the injected logger is
-// actually the one used, not just accepted and ignored.
 test('a corrupt/undecryptable file logs via the injected logger, not the module default', async () => {
   const filePath = await tmpFile();
   await fsp.writeFile(filePath, 'not encrypted at all');

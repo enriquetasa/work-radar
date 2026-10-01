@@ -958,8 +958,8 @@ function createSyncEngine(options = {}) {
   function start() {
     if (intervalHandle) return;
     intervalHandle = setInterval(() => {
-      // Retry timers own the cadence while backoff is active.
-      if (backoffAttempts > 0) return;
+      // Active cycles and retry timers already own the cadence.
+      if (cycleRunning || backoffAttempts > 0) return;
       triggerNow().catch((err) => log.error('sync interval trigger failed', { err }));
     }, intervalMs);
     triggerNow().catch((err) => log.error('sync startup trigger failed', { err }));

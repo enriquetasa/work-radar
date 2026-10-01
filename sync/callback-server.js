@@ -1,29 +1,4 @@
 'use strict';
-/* ============================================================
-   WORK RADAR — loopback callback server
-   Thin node:http wiring around callback-request.js's pure parsing (see
-   docs/supabase-sync-plan.md → "Sign-in flow"). Binds 127.0.0.1 only,
-   runs only while a sign-in is pending, and closes itself after the
-   first callback (success or failure) or after `timeoutMs`.
-
-   Never falls back to a different port on EADDRINUSE — the redirect
-   allow-list in Supabase (site_url / additional_redirect_urls) is an
-   exact match on this port, so silently picking another one would just
-   make the redirect fail instead.
-
-   `waitForCallback()` returns `{ listening, result, cancel }` rather than
-   a single promise: `listening` settles as soon as the port is bound (or
-   rejects on EADDRINUSE, with a clear message), so a caller — see
-   sync/auth-service.js — can confirm the server is actually up *before*
-   sending a magic-link email that can't be recovered if the bind fails.
-   `result` settles the way the old single promise used to: with the
-   parsed callback, or a rejection (Supabase error, timeout, or a
-   post-bind server error). `cancel()` settles `result` as 'cancelled'
-   without a request ever arriving, for a caller that needs to give up
-   early (e.g. signInWithOtp itself failing after the server is already
-   listening).
-   ============================================================ */
-
 const http = require('http');
 const { parseCallbackRequest, CALLBACK_PATH } = require('./callback-request');
 const defaultLog = require('../logger');
@@ -33,18 +8,13 @@ const PORT = 54390;
 const TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes, per the plan
 const REDIRECT_TO = `http://${HOST}:${PORT}${CALLBACK_PATH}`;
 
-// Applied to every response this server ever sends (success, failure or
-// 404) as defence in depth alongside escaping — this origin never needs
-// to load anything, run inline script, or have its content type sniffed.
+// All callback responses use a locked-down CSP.
 const SECURITY_HEADERS = {
   'Content-Security-Policy': "default-src 'none'; style-src 'unsafe-inline'",
   'X-Content-Type-Options': 'nosniff',
 };
 
-// Bare `&<>"'` escaping — result.error / result.errorDescription come
-// straight off the query string an attacker fully controls (see the
-// module doc comment), so this must run before either ever reaches the
-// HTML string below.
+// Escape provider-controlled query values before rendering HTML.
 function escapeHtml(value) {
   return String(value).replace(
     /[&<>"']/g,
@@ -52,8 +22,7 @@ function escapeHtml(value) {
   );
 }
 
-// A real error/error_description is short. Capping before escaping keeps
-// a maliciously long payload from bloating the response either way.
+// Bound reflected error text.
 const MAX_REFLECTED_LEN = 300;
 function capped(value) {
   return String(value).slice(0, MAX_REFLECTED_LEN);
@@ -71,18 +40,13 @@ function page(title, message) {
   );
 }
 
-// The plan's wording, deliberately not "signed in" — this page is served
-// as soon as the redirect lands, before exchangeCodeForSession has run.
 const SUCCESS_HTML = page('Work Radar', 'You can close this tab and return to Work Radar.');
 function failureHtml(result) {
   const safe = escapeHtml(capped(result.errorDescription || result.error));
   return page('Work Radar', 'Sign-in failed: ' + safe);
 }
 
-// Listens for exactly one Supabase redirect. `port`/`timeoutMs` are
-// injectable so tests can use a short timeout and (in dedicated tests)
-// provoke EADDRINUSE deterministically; `log` is injectable so tests
-// don't spam stdout/stderr with this module's own structured logs.
+// Listen for one callback; injectable timing and logging keep tests deterministic.
 function waitForCallback({
   port = PORT,
   host = HOST,
@@ -102,9 +66,7 @@ function waitForCallback({
     resolveResult = resolve;
     rejectResult = reject;
   });
-  // `listening` rejecting is itself a valid way for `result` to settle
-  // (nobody should await `result` without it ever resolving), so give it
-  // a no-op catch here — the real rejection is observed via `listening`.
+  // Result follows early bind failures too.
   listening.catch(() => {});
 
   const server = http.createServer((req, res) => {
@@ -113,9 +75,7 @@ function waitForCallback({
       res.writeHead(404, SECURITY_HEADERS).end();
       return;
     }
-    // 'Connection: close' — this is a one-shot server, about to shut
-    // itself down; without it, a keep-alive socket can hold server.close()
-    // pending for its idle timeout instead of settling right away.
+    // This one-shot server must not retain keep-alive sockets.
     res.writeHead(200, {
       ...SECURITY_HEADERS,
       'Content-Type': 'text/html; charset=utf-8',
@@ -142,9 +102,6 @@ function waitForCallback({
     };
     if (server.listening) {
       server.close(closeAndSettle);
-      // Node 18.2+: without this, a lingering (e.g. preconnect) socket can
-      // hold server.close()'s callback pending past the sign-in that just
-      // finished.
       if (typeof server.closeAllConnections === 'function') server.closeAllConnections();
     } else {
       closeAndSettle();
@@ -153,10 +110,7 @@ function waitForCallback({
 
   server.on('error', (err) => {
     if (!isListening) {
-      // Never happened yet — this is a bind failure, not a mid-flight
-      // server error. Map EADDRINUSE to a message the renderer can show
-      // as-is, and never retry on another port (see the module doc
-      // comment for why).
+      // Report bind failures directly and never fall back to another port.
       if (err.code === 'EADDRINUSE') {
         logger.error('loopback callback port already in use — refusing to pick another one', {
           host,

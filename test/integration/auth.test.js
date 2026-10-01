@@ -1,29 +1,4 @@
 'use strict';
-/* ============================================================
-   WORK RADAR — integration test: Phase 3 sign-in flow
-   Exercises the whole magic-link round trip from
-   docs/supabase-sync-plan.md → "Sign-in flow" against the LOCAL
-   Supabase stack: admin-creates a user, drives sync/auth-service.js's
-   signIn() for real, fetches the magic-link email from Mailpit's HTTP
-   API instead of a real inbox, requests the link so its redirect
-   reaches our real loopback server (sync/callback-server.js), and
-   asserts a session comes back, gets persisted through the (fake)
-   encryptor, and is restorable by a brand-new client reading the same
-   storage file.
-
-   Needs `npx supabase start` already running. Never targets a hosted
-   project — URL/keys are read fresh from `supabase status -o json`
-   every run, same as test/integration/sync.test.js; no key is ever
-   committed.
-
-   If this fails with a rate-limit error from Supabase, the local
-   stack's [auth.rate_limit] email_sent in supabase/config.toml is too
-   low for repeated runs — raise it (local-only setting) and
-   `npx supabase stop && npx supabase start`.
-
-   Deliberately excluded from `npm test` — run via `npm run test:integration`.
-   ============================================================ */
-
 const { test, before, after } = require('node:test');
 const assert = require('node:assert/strict');
 const crypto = require('node:crypto');

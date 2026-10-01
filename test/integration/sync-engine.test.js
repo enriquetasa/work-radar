@@ -1,24 +1,4 @@
 'use strict';
-/* ============================================================
-   WORK RADAR — integration tests: sync engine (Phases 4-5)
-   Drives two independent sync engine instances — "two machines" —
-   against the LOCAL Supabase stack, signed in as the same user (two
-   independent sessions, the way two real devices would be), each with
-   its own tmp userData directory. No fakes here: these use the engine's
-   real default push/pull implementations (buildDefaultPushRpc/
-   buildDefaultPullPage in sync/sync-engine.js) against the real
-   push_items/push_log_entries RPCs and a real select('*') pull — the
-   unit tests in test/sync-engine.test.js cover the engine's logic with
-   fakes; this covers the wiring to the actual database.
-
-   Needs `npx supabase start` already running. Never targets a hosted
-   project — URL/keys are read fresh from `supabase status -o json`
-   every run (see the secrets rule), same pattern as
-   test/integration/sync.test.js and auth.test.js.
-
-   Excluded from `npm test` — run via `npm run test:integration`.
-   ============================================================ */
-
 const { test, before, after } = require('node:test');
 const assert = require('node:assert/strict');
 const crypto = require('node:crypto');

@@ -1,13 +1,4 @@
 'use strict';
-/* ============================================================
-   WORK RADAR — unit tests: realtime sync trigger (Phase 6)
-   Fakes the supabase-js client/channel (see makeFakeClient below) so
-   the subscribe/unsubscribe/event-routing logic in sync/realtime.js is
-   exercised without a real socket — the same split as
-   test/sync-engine.test.js faking pushItemsRpc/pullItemsPage instead of
-   a live PostgREST call.
-   ============================================================ */
-
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 
@@ -26,33 +17,6 @@ function spyLog() {
 
 const silentLog = { debug() {}, info() {}, warn() {}, error() {}, critical() {} };
 
-// Stands in for supabase-js's RealtimeChannel/SupabaseClient far enough
-// to exercise sync/realtime.js: `.channel(topic)` returns a chainable
-// fake channel recording its `postgres_changes` handlers per table;
-// `.subscribe(cb)` stores the status callback; `_emit`/`_status` are
-// test-only hooks to drive it, standing in for what a real socket would
-// deliver. `removeChannel` is async, like the real one.
-// `removeChannel` is injectable (default: resolves 'ok', like a clean
-// real teardown) so tests can drive the other two outcomes a real
-// removeChannel() can settle with — resolving something other than
-// 'ok', and rejecting — see the "unsubscribe teardown" tests below.
-//
-// Three behaviours are mirrored from the installed
-// @supabase/realtime-js (2.117.1) because a Phase 6 bug only shows up
-// when they interact (found in review — see docs/supabase-sync-plan.md's
-// Phase 6 notes and the "reused topic" tests below):
-//  1. `client.channel(topic)` returns the SAME channel object for a
-//     topic that's still open — including one that's mid-`leave()` —
-//     rather than always minting a new one (RealtimeClient.channel()).
-//  2. `.on('postgres_changes', filter, cb)` silently drops a callback
-//     whose filter (here: same `table`) duplicates one already bound on
-//     that channel, rather than adding a second binding
-//     (RealtimeChannel._on() — the server collapses identical filters).
-//  3. `.subscribe(cb)` only actually (re)registers the status callback
-//     while the channel is closed; calling it again on a channel that's
-//     already joining/joined/leaving is a no-op
-//     (RealtimeChannel.subscribe()'s `if (this.channelAdapter.isClosed())`
-//     guard).
 function makeFakeClient({ removeChannel } = {}) {
   const channels = [];
   const topics = new Map(); // topic -> still-open channel for it, if any
@@ -153,14 +117,7 @@ test('subscribe registers postgres_changes handlers for both tables', () => {
 
   assert.equal(client._channels.length, 1);
   const ch = client._channels[0];
-  // Carries the channelId, not just the userId (found in review — see
-  // the "reused topic" test below for why a userId-only topic is
-  // unsafe): every subscription gets its own topic so realtime-js never
-  // hands a later subscribe() the same, possibly-still-leaving channel.
   assert.match(ch.topic, /^work-radar-sync:user-1:[0-9a-f-]{36}$/);
-  // Exactly one binding per table, with the exact filter shape — a
-  // regression to schema/event type or a dropped table binding would
-  // otherwise still pass with only the topic asserted (found in review).
   assert.deepEqual(ch.bindings, [
     { event: '*', schema: 'public', table: 'items' },
     { event: '*', schema: 'public', table: 'log_entries' },
@@ -302,10 +259,6 @@ test('unsubscribe logs a warning when removeChannel resolves something other tha
   assert.equal(typeof ctx.channelId, 'string');
   assert.equal(ctx.result, 'timed out');
   assert.equal(logCalls.error.length, 0);
-  // Real removeChannel() only calls channel.teardown() on an 'ok' leave
-  // (see RealtimeClient.removeChannel() in @supabase/realtime-js) — on
-  // any other result the channel is left with its timers/bindings still
-  // live unless this module tears it down itself (found in review).
   assert.ok(ch._teardownCalled, 'a non-ok removeChannel result must still be torn down');
 });
 
@@ -389,19 +342,6 @@ test('re-subscribing without an explicit unsubscribe first tears down the old ch
   assert.equal(calls, 1);
 });
 
-// The actual production bug (found in review): `client.channel(topic)`
-// hands back the SAME still-open channel for a topic that was fixed per
-// user (`work-radar-sync:${userId}`), because `removeChannel()`'s leave
-// is async and the old channel isn't de-registered until it settles. A
-// second `subscribe()` for the same user landing in that window (e.g.
-// sign-out/sign-in as the same user while a degraded network delays the
-// first leave) got a channel whose `postgres_changes` bindings for both
-// tables were dropped as duplicates (note 2 on makeFakeClient above),
-// leaving the new subscription's own event callbacks never registered
-// at all — silently no realtime for that session, no warning logged.
-// Giving every subscription its own topic (via `channelId`) means
-// `client.channel()` never sees a repeat topic in the first place, so
-// this can't happen regardless of how slowly the old channel leaves.
 test('subscribing again for the same user before the previous channel finishes leaving still delivers events', async () => {
   const client = makeFakeClient();
   let calls = 0;

@@ -1,42 +1,22 @@
 'use strict';
-/* ============================================================
-   WORK RADAR — domain
-   Pure, side-effect-free logic shared by the renderer and the
-   test suite. No DOM, no storage, no Electron. Loaded as a
-   browser global (window.WorkRadarDomain) via <script>, and as a
-   CommonJS module (require) under node:test.
-   ============================================================ */
-
 (function (root) {
   const SCHEMA = 3;
   const STALE_DAYS = 14; // default review interval for existing projects
   const BACKUP_DAYS = 7; // nudge to export after this long
   const DAY = 86400000;
 
-  // Priority colours (also the set of valid priorities).
   const PC = { critical: '#f44336', high: '#ff9100', medium: '#00e676', low: '#26c6da' };
-  // Status colours (also the set of valid statuses).
   const SC = { active: '#00e676', watch: '#ff9100', dormant: '#546e7a' };
-  // Status -> radar ring radius fraction.
-  const SR = { active: 0.31, watch: 0.6, dormant: 0.87 };
-  // Priority -> sort rank.
   const PRANK = { critical: 0, high: 1, medium: 2, low: 3 };
   const CX = 128;
   const CY = 128;
   const R = 110;
 
-  // globalThis.crypto (not a require) so this works both as a browser
-  // global in the sandboxed, contextIsolated renderer (file:// counts as
-  // a secure context in Chromium, so Web Crypto is available) and as
-  // CommonJS under node:test, where globalThis.crypto is Node's Web
-  // Crypto implementation.
   function uid() {
     return globalThis.crypto.randomUUID();
   }
 
-  // Small stable string hash (djb2 variant). Used only to derive
-  // deterministic ids for legacy log entries — never for anything that
-  // needs to be collision-proof against adversarial input.
+  // Stable, non-cryptographic hash for legacy IDs and radar angles.
   function hashString(s) {
     let h = 5381;
     for (let i = 0; i < s.length; i++) {
@@ -45,14 +25,7 @@
     return (h >>> 0).toString(36);
   }
 
-  // Legacy log entries (schema v2 and older) have no id. Two machines
-  // migrating the same legacy file independently must assign the same id
-  // to "the same" entry, so it is derived from its content rather than
-  // random (uid()) or positional (array index, which shifts under merge).
-  // itemId and ts are embedded verbatim (not hashed) so only `text` goes
-  // through the lossy hash, keeping the collision surface small; `log_entries.id`
-  // is a global primary key downstream, so a collision would silently drop
-  // an entry or fail a push.
+  // Content-derived IDs keep legacy log migration deterministic across devices.
   function legacyLogId(itemId, ts, text) {
     return 'lg_' + itemId + '_' + ts + '_' + hashString(text);
   }
@@ -135,33 +108,17 @@
     return attentionReasons(item, now).length > 0;
   }
 
-  // Normalise an arbitrary list (legacy data, imports) into the current
-  // schema, dropping anything without a name and coercing invalid enums.
-  // Also carries schema v2 (and older) data forward to v3: adds a stable id
-  // to any log entry missing one, and leaves deletedAt (the purge
-  // tombstone marker, new in v3) unset unless already present.
+  // Normalize imported and legacy records to the current schema.
   function migrate(list, now = Date.now()) {
     return list
       .filter((x) => x && x.name)
       .map((x) => {
         const id = x.id || uid();
-        // Malformed entries are dropped rather than crashing the whole
-        // migration on a corrupt data file or import: non-objects (null,
-        // strings, ...) outright, and — for entries with no id of their own
-        // (legacy v2 and older) — anything without a finite numeric `ts`,
-        // since legacyLogId needs `ts` to derive a stable id and a
-        // non-numeric one can't be trusted to be comparable across entries.
-        // `text` is coerced to a string (missing/null becomes '') rather
-        // than dropped, since a log entry with real content but no message
-        // text is still worth keeping.
+        // Keep only log entries with an existing or derivable stable ID.
         const rawLog = Array.isArray(x.log)
           ? x.log.filter((e) => e && typeof e === 'object' && (e.id || Number.isFinite(e.ts)))
           : [];
-        // Two identical legacy entries (same item, ts and text) hash to the
-        // same base id; disambiguate with an occurrence index so they don't
-        // collapse into one entry once ids are unioned during a merge. Both
-        // sides migrating the same file independently see entries in the
-        // same array order, so the index stays deterministic across machines.
+        // Disambiguate duplicate legacy entries without losing determinism.
         const seen = new Map();
         const log = rawLog.map((e) => {
           if (e.id) return { ...e };
@@ -171,22 +128,7 @@
           seen.set(base, n + 1);
           return { ...e, text, id: n === 0 ? base : base + '_' + n };
         });
-        // Under schema v2 (and older), ping/archive/restore/addLogEntry did
-        // not bump updatedAt, so a legacy row's updatedAt can be older than
-        // its reviewedAt, archivedAt, or its newest log entry. If migrate()
-        // left updatedAt as-is, "newest updatedAt wins" would tie two v2-era
-        // copies that really differ in time and let the tie-break (which
-        // doesn't know about any of this) decide arbitrarily — e.g. undoing
-        // an archive+ping by resurrecting an older live backup of the same
-        // item. Taking the max over all of them brings updatedAt up to what
-        // v3 would have recorded. It is a no-op on v3 data, because every v3
-        // mutation already sets updatedAt to at least these values, so this
-        // is safe to run on every load, not just once at the v2->v3 boundary.
-        // The fallback when neither updatedAt nor addedAt is present is 0,
-        // not `now`: two machines migrating the same legacy row independently
-        // must land on the same updatedAt (Math.max below still picks up the
-        // row's own signals, e.g. its newest log ts), or the merge winner
-        // would depend on which machine happened to migrate later.
+        // v2 mutations did not always bump updatedAt; recover the latest deterministic signal.
         const base = x.updatedAt || x.addedAt || 0;
         const logMax = log.reduce((m, e) => (e.ts && e.ts > m ? e.ts : m), 0);
         const updatedAt = Math.max(
@@ -241,9 +183,7 @@
       arch: state.arch,
       lastExport: state.lastExport,
     };
-    // History, attachment metadata, and future additive envelope fields are
-    // intentionally copied through export/import. Keep the legacy shape when
-    // no feature metadata exists so older backups remain compatible.
+    // Copy additive envelope fields only when present to preserve legacy backup shape.
     ['itemRevisions', 'attachments', 'attachmentRecords', 'profileId', 'categoryOptions'].forEach(
       (key) => {
         if (state[key] !== undefined) data[key] = state[key];
@@ -252,7 +192,6 @@
     return data;
   }
 
-  // Filter + sort the current view. Pure: derives from state, never mutates it.
   function selectVisible(state, now = Date.now()) {
     const ui = state.ui;
     const archive = ui.view === 'archive';
@@ -298,9 +237,6 @@
       .replace(/"/g, '&quot;');
   }
 
-  // Build a printable HTML report of all live (non-archived) items, grouped by
-  // priority and sorted by name within each group. Logs are shown chronologically
-  // (oldest-first) so they read as a narrative for supervisors.
   function buildReportHTML(items, now = Date.now()) {
     const date = fdt(now);
     const live = items
@@ -384,16 +320,12 @@ ${groupsHTML}
 </html>`;
   }
 
-  // Hide purge tombstones (deletedAt set) from any list rendered to the
-  // user — lists, stats/counts, search, radar blips. They stay in the data
-  // file (see mergeState) so a later merge still sees the deletion.
+  // Tombstones remain mergeable on disk but never render.
   function stripTombstones(list) {
     return list.filter((i) => !i.deletedAt);
   }
 
-  // Union two versions of the same item's log by id (append-only, so a
-  // union — never a diff), sorted by ts with id as a deterministic
-  // tie-break so the result never depends on argument order.
+  // Union append-only logs deterministically.
   function unionLogs(a, b) {
     const m = new Map();
     (a || []).forEach((e) => m.set(e.id, e));
@@ -403,12 +335,7 @@ ${groupsHTML}
     return [...m.values()].sort((x, y) => x.ts - y.ts || (x.id < y.id ? -1 : x.id > y.id ? 1 : 0));
   }
 
-  // Serialize an item for the tie-break comparison below with a fixed,
-  // sorted key order, so two objects with identical fields compare equal
-  // regardless of the order their keys happen to be in (e.g. rows built
-  // from Supabase, where field order isn't guaranteed). `log` is excluded —
-  // it's compared separately (it's unioned, not tie-broken) and would
-  // otherwise couple the tie-break to log ordering.
+  // Exclude logs and sort keys for a stable tie-break value.
   function stableStringify(item) {
     const keys = Object.keys(item)
       .filter((k) => k !== 'log')
@@ -416,27 +343,14 @@ ${groupsHTML}
     return JSON.stringify(item, keys);
   }
 
-  // Merge two versions of the same item (same id, from two machines/files).
-  // Every field except log is "newest updatedAt wins" — this is uniform
-  // across the whole record, including archivedAt and deletedAt, since
-  // both archive and purge bump updatedAt like any other mutation. That
-  // means a later edit can "resurrect" an item a stale tombstone deleted,
-  // and a later purge always wins over a stale edit. Ties (identical
-  // updatedAt, different content — clock granularity, or edits replayed
-  // twice) are broken deterministically and symmetrically so the winner
-  // never depends on which side is passed as `a` vs `b`.
+  // Newest updatedAt wins; equal timestamps use deterministic tie-breakers.
   function mergeItem(a, b) {
     const log = unionLogs(a.log, b.log);
     let winner;
     if (a.updatedAt !== b.updatedAt) {
       winner = a.updatedAt > b.updatedAt ? a : b;
     } else {
-      // Break the tie on the numeric signals first (reviewedAt, then
-      // archivedAt, then deletedAt) rather than jumping straight to the
-      // text comparison, which compares numbers character by character and
-      // would pick e.g. reviewedAt 99 over 100. Still deterministic and
-      // symmetric (subtraction is antisymmetric); falls back to the text
-      // comparison only once all three are equal too.
+      // Compare numeric timestamps before the stable text fallback.
       const numTie =
         (a.reviewedAt || 0) - (b.reviewedAt || 0) ||
         (a.archivedAt || 0) - (b.archivedAt || 0) ||
@@ -452,11 +366,7 @@ ${groupsHTML}
     return { ...winner, log };
   }
 
-  // Merge two full states (each { items, arch }) into one. Items can move
-  // between live and archived on either side (archive here, edit there),
-  // so the merge is done over the *union* of both sides' items and
-  // archive lists, keyed by id, and only split back into items/arch by
-  // the winning archivedAt at the end.
+  // Merge live and archived records together, then split by the winning state.
   function mergeState(a, b) {
     const all = new Map();
     const absorb = (list) => {
@@ -476,26 +386,9 @@ ${groupsHTML}
     };
   }
 
-  // Item mutations. Every one bumps updatedAt so mergeItem's "newest
-  // updatedAt wins" rule actually sees every change — a mutation that
-  // forgot this bump would let a stale copy on another machine silently
-  // overwrite it, or (for purge) let the item come back from the dead.
-  // Pure: each returns a new item, never mutates the one passed in.
-  // app.js's Actions call these instead of building the patch inline, so
-  // the bump is tested here rather than only reachable through the DOM.
+  // Mutations must advance updatedAt for deterministic merges.
 
-  // Machine clocks differ. A mutation that just stamped updatedAt =
-  // Date.now() could hand back an updatedAt *older* than the row already
-  // carries, if this machine's clock reads behind the clock that wrote
-  // that row (or simply behind this same row's own last edit, replayed
-  // from a pull) — and mergeItem's "newest updatedAt wins" would then
-  // keep discarding this machine's own edit forever, since it can never
-  // catch up under a plain Date.now(). nextUpdatedAt instead always lands
-  // at least one past whatever updatedAt the row already has, using the
-  // wall clock only when that's already ahead. Other timestamp fields
-  // (reviewedAt, archivedAt, deletedAt, log ts) are unaffected — they
-  // keep recording the real wall-clock time, only updatedAt is a
-  // merge-decision field that must never go backwards.
+  // updatedAt is logical merge time and must never move backwards.
   function nextUpdatedAt(prevUpdatedAt, now = Date.now()) {
     return Math.max(now, (prevUpdatedAt || 0) + 1);
   }
@@ -529,9 +422,7 @@ ${groupsHTML}
     return reviewItem(rest, now);
   }
 
-  // PURGE never removes the record — see mergeItem's doc comment for why a
-  // tombstone (deletedAt) has to be an ordinary "newest updatedAt wins"
-  // mutation, not a special case, so it merges the same way as any edit.
+  // Deletion is a mergeable tombstone, not physical removal.
   function purgeItem(item, now = Date.now()) {
     return { ...item, deletedAt: now, updatedAt: nextUpdatedAt(item.updatedAt, now) };
   }
@@ -545,7 +436,6 @@ ${groupsHTML}
     };
   }
 
-  // Keep item creation and clock-skew-safe updates out of the DOM layer.
   function createItem(v, now = Date.now(), idFn = uid) {
     return {
       id: idFn(),
@@ -571,8 +461,7 @@ ${groupsHTML}
     };
   }
 
-  // Merge instead of replacing so reload cannot erase a renderer edit whose
-  // save is still in flight. Migrate disk data before applying merge rules.
+  // Merge disk state so reloads cannot erase an in-flight renderer edit.
   function mergeDiskIntoStore(fromDisk, store) {
     const merged = mergeState(
       {
@@ -587,8 +476,7 @@ ${groupsHTML}
       arch: merged.arch,
       lastExport: Math.max(fromDisk.lastExport || 0, store.lastExport || 0),
     };
-    // A reload must not rebuild the envelope from only items/arch and discard
-    // history or attachment metadata introduced by a newer writer.
+    // Preserve additive metadata from either side.
     ['itemRevisions', 'attachments', 'attachmentRecords', 'profileId'].forEach((key) => {
       if (Array.isArray(fromDisk[key]) || Array.isArray(store[key])) {
         const rows = [
@@ -612,16 +500,27 @@ ${groupsHTML}
     return mergedState;
   }
 
-  // Deterministic blip placement: a golden-angle spiral keyed off the id,
-  // at a radius set by the item's status ring.
-  function blipXY(item) {
-    const h = [...item.id].reduce((a, c) => a + c.charCodeAt(0), 0);
+  // Angle separates dots; radius encodes priority and review distance.
+  function blipXY(item, now = Date.now()) {
+    const h = parseInt(hashString(String(item.id || item.name || 'project')), 36);
     const deg = (h * 137.508) % 360;
     const rad = ((deg - 90) * Math.PI) / 180;
+    const priority = (PRANK[item.priority] ?? PRANK.medium) / 3;
+    const review = reviewDate(item);
+    const today = localDate(now);
+    const daysUntilReview = review
+      ? Math.round(
+          (new Date(review + 'T12:00:00').getTime() - new Date(today + 'T12:00:00').getTime()) / DAY
+        )
+      : 90;
+    const reviewDistance = Math.min(1, Math.max(0, daysUntilReview) / 90);
+    const radiusFraction = 0.16 + 0.74 * (priority * 0.55 + reviewDistance * 0.45);
     return {
-      x: CX + Math.cos(rad) * R * SR[item.status],
-      y: CY + Math.sin(rad) * R * SR[item.status],
+      x: CX + Math.cos(rad) * R * radiusFraction,
+      y: CY + Math.sin(rad) * R * radiusFraction,
       deg,
+      radiusFraction,
+      daysUntilReview: review ? daysUntilReview : null,
     };
   }
 
@@ -632,7 +531,6 @@ ${groupsHTML}
     DAY,
     PC,
     SC,
-    SR,
     PRANK,
     CX,
     CY,

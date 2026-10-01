@@ -149,10 +149,6 @@ test('getStatus reports the signed-in email when a session exists', async () => 
   });
 });
 
-// New: the whole point of carrying userId on the status is that a
-// realtime subscribe (main.js/sync/sync-lifecycle.js) can use it directly
-// off this same push instead of a separate getSession() read — see
-// toStatus()'s own doc comment above (found in review — Phase 6).
 test('getStatus and onChange both carry the signed-in session userId', async () => {
   const { client, fireChange } = makeFakeClient({
     getSession: async () => ({
@@ -329,11 +325,6 @@ test('signIn throws when the loopback callback rejects (error or timeout)', asyn
   await assert.rejects(service.signIn('person@example.com'), /sign-in window/);
 });
 
-// Found in review: this is the most common failure path (a Supabase
-// `?error=` redirect, a timeout, or a cancel), and until this test, only
-// the callback server's own log line (no attemptId) and main.js's generic
-// "sign-in failed" (no attemptId) ever recorded it — no line correlated
-// the failure with the rest of this attempt's logs via attemptId.
 test('signIn logs a loopback callback failure with the attempt id', async () => {
   const { client } = makeFakeClient();
   const { waitForCallback } = fakeWaitForCallback({
@@ -389,10 +380,6 @@ test('signIn refuses to start when a session is already signed in', async () => 
 });
 
 test('signIn (failure path) pushes the settled pending:false status after the rejection, never before', async () => {
-  // Pins the ordering renderer/auth-view.js's fix depends on: the IPC
-  // reply carrying signIn()'s rejection reaches the renderer before the
-  // settled onChange push — see docs/supabase-sync-plan.md's Phase 3
-  // "Renderer" notes and test/auth-view.test.js.
   const { client } = makeFakeClient({
     signInWithOtp: async () => ({ data: null, error: new Error('rate limited') }),
   });

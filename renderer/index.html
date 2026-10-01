@@ -72,6 +72,7 @@
           <button class="tab active" data-view="today" aria-pressed="true">
             Today <span id="today-count">0</span></button
           ><button class="tab" data-view="all" aria-pressed="false">All</button
+          ><button class="tab" data-view="radar" aria-pressed="false">Radar</button
           ><button class="tab" data-view="recovery" aria-pressed="false">Recovery</button>
         </div>
         <div id="all-controls" hidden>
@@ -107,6 +108,28 @@
             <span id="view-date"></span>
           </div>
           <div id="list"><div id="empty-msg" role="status"></div></div>
+          <div id="radar-view" hidden>
+            <p id="radar-guide">
+              Center: higher priority + review sooner · Edge: lower priority + review later
+            </p>
+            <div id="radar-layout">
+              <div id="radar-stage" aria-label="Project priority and review radar">
+                <span class="radar-axis radar-axis-horizontal" aria-hidden="true"></span>
+                <span class="radar-axis radar-axis-vertical" aria-hidden="true"></span>
+                <span class="radar-ring radar-ring-outer" aria-hidden="true"></span>
+                <span class="radar-ring radar-ring-middle" aria-hidden="true"></span>
+                <span class="radar-ring radar-ring-inner" aria-hidden="true"></span>
+                <span class="radar-center" aria-hidden="true">NOW</span>
+                <div id="radar-blips"></div>
+              </div>
+              <aside id="radar-legend" aria-label="Category colours"></aside>
+            </div>
+            <div id="radar-empty" role="status" hidden>
+              <span class="empty-symbol">◈</span>
+              <h2>A clear radar.</h2>
+              <p>Add a project to place it on the radar.</p>
+            </div>
+          </div>
         </section>
         <aside id="inspector" hidden>
           <section id="detail-panel" aria-label="Project details" hidden>

@@ -151,10 +151,6 @@ test('rejects listening with a clear message on EADDRINUSE rather than picking a
 });
 
 test('signInWithOtp-style callers can tell binding failed before doing anything else', async () => {
-  // Regression for the non-blocking ordering issue: the caller must be able
-  // to await `listening` and find out about EADDRINUSE *before* it has sent
-  // any email, rather than only discovering it once `result` rejects after
-  // the fact.
   const port = freshPort();
   const blocker = http.createServer(() => {});
   await new Promise((resolve, reject) => {

@@ -1,24 +1,4 @@
 'use strict';
-/* ============================================================
-   WORK RADAR — integration tests: realtime sync trigger (Phase 6)
-   Drives two real sync-engine instances — "two machines", same pattern
-   as test/integration/sync-engine.test.js — but machine B never polls:
-   its sync-state.json interval is effectively disabled (engine.start()
-   is never called at all, so no 60s timer exists) and it never calls
-   triggerNow() itself. The only thing that can make it pull is a real
-   Supabase Realtime event delivered through sync/realtime.js, wired to
-   the real public.items/public.log_entries changefeed — no fakes here;
-   test/sync-realtime.test.js covers the module's own logic against a
-   fake client/channel.
-
-   Needs `npx supabase start` already running, with Realtime enabled
-   (the default — see supabase/config.toml's [realtime] section) and
-   both tables already in the supabase_realtime publication (see
-   supabase/migrations/..._add_tables_to_realtime_publication.sql).
-
-   Excluded from `npm test` — run via `npm run test:integration`.
-   ============================================================ */
-
 const { test, before, after } = require('node:test');
 const assert = require('node:assert/strict');
 const crypto = require('node:crypto');
@@ -189,15 +169,6 @@ function wireRealtime(client, engine) {
     log: silentLog,
     onChange: () => {
       state.calls += 1;
-      // Chained onto the previous cycle rather than reassigned outright
-      // (found in review): triggerNow() only starts a new cycle when
-      // none is running — if one already is, it just sets
-      // `rerunRequested` and resolves immediately, so a bare
-      // `state.lastCycle = engine.triggerNow()` could replace the
-      // in-flight cycle's promise with one that's already settled while
-      // the real work is still going. Chaining means `state.lastCycle`
-      // always still resolves only once every cycle this triggered,
-      // including the eventual rerun, has actually finished.
       state.lastCycle = state.lastCycle.then(() => engine.triggerNow());
       return state.lastCycle;
     },
@@ -240,13 +211,6 @@ test('machine B picks up machine A change via realtime, with its own interval ef
     const before = state.calls;
     await pushRtA();
 
-    // Machine B never calls triggerNow() itself and never started its
-    // own interval — only a realtime-driven pull can make this appear.
-    // realtime-js can report SUBSCRIBED slightly before the server-side
-    // replication slot is fully attached, which can drop the very first
-    // change published right after subscribe — re-push on each poll
-    // that still finds nothing, rather than let that show up as an
-    // opaque 15s timeout (found in review).
     await waitFor(async () => {
       const data = await readData(m2.dataFilePath);
       if (findItem(data, 'RT-A')) return true;
@@ -259,19 +223,8 @@ test('machine B picks up machine A change via realtime, with its own interval ef
     assert.ok(state.calls > before, 'the table-change event must have triggered a pull');
   } finally {
     if (realtime2) realtime2.unsubscribe();
-    // unsubscribe() only tears down the channel — a realtime-triggered
-    // triggerNow() it kicked off keeps running on its own. stop() first
-    // (so no new retry/rerun gets scheduled), then await that last cycle
-    // so it can't still be mid-flight against a deleted user after this
-    // test's after() hook runs (found in review).
     m2.engine.stop();
     if (state) await state.lastCycle.catch(() => {});
-    // Machine A's engine is also stopped (found in review): every
-    // pushRtA() call goes through recordLocalSave(), which arms a 3s
-    // debounce timer. The last one otherwise outlives this test and can
-    // fire during the next test, or mid-cleanup once `after()` has
-    // already deleted the shared user, and keeps the process alive for
-    // up to 3s regardless.
     m1.engine.stop();
     // Close the underlying websocket outright, not just the channel —
     // otherwise the open realtime socket keeps this test file's process
