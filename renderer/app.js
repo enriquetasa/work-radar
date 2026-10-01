@@ -1186,6 +1186,18 @@ function selectProject(item) {
   if (Store.ui.sel) document.getElementById('detail-close').focus();
 }
 
+function closeDetail() {
+  const selectedId = Store.ui.sel;
+  Store.ui.sel = null;
+  render();
+  if (Store.ui.view === 'radar') {
+    const blip = [...document.querySelectorAll('.radar-blip')].find(
+      (element) => element.dataset.itemId === selectedId
+    );
+    (blip || document.querySelector('.tab[data-view="radar"]')).focus();
+  }
+}
+
 function renderRadar() {
   const items = stripTombstones(Store.items);
   const blips = document.getElementById('radar-blips');
@@ -1216,6 +1228,8 @@ function renderRadar() {
     const blip = node('button', 'radar-blip' + (Store.ui.sel === item.id ? ' selected' : ''));
     blip.classList.toggle('label-left', point.x > D.CX);
     blip.type = 'button';
+    blip.dataset.itemId = item.id;
+    blip.setAttribute('aria-controls', 'detail-panel');
     blip.style.left = (point.x / (D.CX * 2)) * 100 + '%';
     blip.style.top = (point.y / (D.CY * 2)) * 100 + '%';
     blip.style.setProperty('--category-color', categoryColor(item));
@@ -1250,6 +1264,9 @@ function renderDetail() {
       : [...stripTombstones(Store.items), ...stripTombstones(Store.arch)]
   ).find((i) => i.id === Store.ui.sel);
   panel.hidden = !it || Store.ui.showForm;
+  document
+    .getElementById('body')
+    .classList.toggle('viewing-radar-project', Store.ui.view === 'radar' && !panel.hidden);
   document.getElementById('inspector').hidden = !it && !Store.ui.showForm;
   if (panel.hidden) return;
   if (Store.ui.view === 'recovery') {
@@ -1891,10 +1908,7 @@ function wire() {
     Store.ui.filter = e.target.value;
     renderList();
   });
-  document.getElementById('detail-close').addEventListener('click', () => {
-    Store.ui.sel = null;
-    render();
-  });
+  document.getElementById('detail-close').addEventListener('click', closeDetail);
   document.querySelectorAll('[data-review-days]').forEach((button) => {
     button.addEventListener('click', () => {
       document.getElementById('f-review').value = dateAfter(Number(button.dataset.reviewDays));
@@ -1990,8 +2004,7 @@ function wire() {
         document.getElementById('search').value = '';
         render();
       } else if (Store.ui.sel) {
-        Store.ui.sel = null;
-        render();
+        closeDetail();
       }
       return;
     }

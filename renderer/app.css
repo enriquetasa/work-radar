@@ -424,12 +424,16 @@ select {
   min-height: 0;
 }
 #radar-view {
+  display: flex;
+  flex-direction: column;
   flex: 1;
   min-height: 0;
-  overflow: auto;
+  min-width: 0;
+  overflow: hidden;
   padding: 12px 16px 16px;
 }
 #radar-guide {
+  flex-shrink: 0;
   color: #2e7d4a;
   font-size: 7px;
   letter-spacing: 1px;
@@ -440,15 +444,22 @@ select {
 }
 #radar-layout {
   display: grid;
-  grid-template-columns: minmax(260px, 1fr) minmax(120px, 180px);
-  align-items: start;
+  flex: 1;
+  min-height: 0;
+  grid-template-columns: minmax(0, 1fr) minmax(120px, 180px);
+  grid-template-rows: minmax(0, 1fr);
   gap: 20px;
-  max-width: 820px;
-  margin: 0 auto;
+}
+#radar-plot {
+  container-type: size;
+  display: grid;
+  place-items: center;
+  min-width: 0;
+  min-height: 0;
 }
 #radar-stage {
   position: relative;
-  width: min(100%, 620px);
+  width: min(100cqw, 100cqh);
   aspect-ratio: 1;
   justify-self: center;
   border: 1px solid #1a5c2c;
@@ -568,6 +579,10 @@ select {
   border: 1px solid #0f2816;
   padding: 10px;
   min-width: 0;
+  min-height: 0;
+  max-height: 100%;
+  align-self: start;
+  overflow-y: auto;
 }
 #radar-legend h2 {
   letter-spacing: 1.5px;
@@ -1030,11 +1045,14 @@ label {
   }
   #radar-layout {
     grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr) auto;
+    gap: 10px;
   }
   #radar-legend {
     display: flex;
     flex-wrap: wrap;
     gap: 4px 14px;
+    max-height: min(120px, 25vh);
   }
   #radar-legend h2 {
     flex-basis: 100%;
@@ -1062,8 +1080,18 @@ label {
   gap: 6px;
   min-width: 0;
 }
-#body.editing-project #list-panel {
+#body.editing-project #list-panel,
+#body.viewing-radar-project #list-panel {
   display: none;
+}
+#body.viewing-radar-project #inspector {
+  flex: 1;
+  min-height: 0;
+  max-height: none;
+}
+#body.viewing-radar-project #detail-panel {
+  min-height: 100%;
+  border-bottom: 0;
 }
 #body.editing-project #inspector {
   flex: 1;
