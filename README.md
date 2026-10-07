@@ -293,11 +293,18 @@ review date, a **Waiting on** person/team/event, and a **Next checkpoint** with 
 date. Existing projects retain their 14-day review rhythm. Dates use the local calendar,
 so a checkpoint due today appears throughout today, independent of its creation time.
 
-**Reviewed** records a review and schedules the next one using that project's rhythm.
-A custom next date overrides that occurrence. Snoozing changes the review date without
-marking the project reviewed. Neither action clears a checkpoint: complete or edit it
-separately when the expected event happens. Waiting-on text without a date does not itself
-add a project to Today. Blank next-review dates use the rhythm; manual rhythm without a
+**Complete review** saves the optional status update and records the review together,
+scheduling the next one using the project's rhythm or the selected next date. **Save update
+only** records the note without changing the review date. **Snooze review…** has its own date
+choice and postpones the review without marking it reviewed. Neither action clears a
+checkpoint: complete or edit it separately when the expected event happens.
+
+After a successful review, Today returns to the list when nothing else is due for that
+project; otherwise it explains what still needs attention. Unsent update drafts and date
+choices survive closing and reopening project details during the current app session.
+Archive offers Undo, which restores the project without changing its review date.
+
+Waiting-on text without a date does not itself add a project to Today. Blank next-review dates use the rhythm; manual rhythm without a
 specific next date disables scheduled reviews.
 
 JSON export, import, PDF reporting, and automatic backup access live in the **Radar**
@@ -316,7 +323,7 @@ Upgrade your other clients to edit the new fields.
 ## Keyboard
 
 `Cmd/Ctrl+N` new · `Cmd/Ctrl+F` search All · `Cmd/Ctrl+E` export · `Cmd/Ctrl+I` import
-In-window: `N` new · `/` search All · `E` edit · `R` (or `P`) reviewed · `A` archive · `Esc` close
+In-window: `N` new · `/` search All · `E` edit · `R` (or `P`) complete review · `A` archive · `Esc` close
 
 ## Development
 

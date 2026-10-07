@@ -177,3 +177,34 @@ test('PDF report includes escaped scheduling and follow-up context', () => {
   assert.ok(report.includes('Waiting on: Alex &amp; team'));
   assert.ok(report.includes('Checkpoint: &lt;Decision&gt; (2026-09-30)'));
 });
+
+test('completing a review saves its optional update and chosen date together', () => {
+  const item = create({
+    nextReviewOn: '2026-09-24',
+    checkpoint: 'Approval',
+    checkpointOn: '2026-09-24',
+  });
+  const result = D.completeReview(
+    item,
+    '  Team is on track  ',
+    NOW + 1000,
+    '2026-10-02',
+    () => 'entry'
+  );
+  assert.equal(result.reviewedAt, NOW + 1000);
+  assert.equal(result.nextReviewOn, '2026-10-02');
+  assert.deepEqual(result.log, [{ id: 'entry', ts: NOW + 1000, text: 'Team is on track' }]);
+  assert.deepEqual(D.attentionReasons(result, NOW), ['Checkpoint today']);
+  assert.equal(item.log.length, 0);
+  assert.equal(item.nextReviewOn, '2026-09-24');
+});
+
+test('completing a review without an update uses the rhythm without adding blank activity', () => {
+  const item = create({ reviewIntervalDays: 7 });
+  const result = D.completeReview(item, '   ', NOW);
+  assert.equal(result.nextReviewOn, '2026-10-01');
+  assert.equal(result.log.length, 0);
+  assert.equal(D.isDueToday(result, NOW), false);
+  const manual = D.completeReview(create({ reviewIntervalDays: null }), '', NOW);
+  assert.equal(manual.nextReviewOn, '');
+});

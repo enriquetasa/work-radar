@@ -27,9 +27,11 @@ const Persist = {
     }
     try {
       localStorage.setItem('workradar', JSON.stringify(obj));
+      return { ok: true };
     } catch (e) {
       console.error('localStorage write failed', e);
       alert('STORAGE WRITE FAILED — export a backup now.');
+      return { ok: false };
     }
   },
 };
@@ -103,7 +105,15 @@ const Store = {
 const detailDrafts = new Map();
 function detailDraft(id) {
   if (!detailDrafts.has(id))
-    detailDrafts.set(id, { note: '', reviewChoice: 'rhythm', reviewDate: '' });
+    detailDrafts.set(id, {
+      note: '',
+      reviewChoice: 'rhythm',
+      reviewDate: '',
+      snoozeChoice: '1',
+      snoozeDate: '',
+      snoozeOpen: false,
+      pending: false,
+    });
   return detailDrafts.get(id);
 }
 
@@ -131,7 +141,7 @@ function mergeSavedMetadata(data) {
 function scheduleSave(options = {}) {
   if (loadFailed) {
     console.error('save skipped: Store.load() failed at boot, refusing to overwrite data file');
-    return;
+    return Promise.resolve({ ok: false });
   }
   const payload = { ...Store.serialize(), ...options };
   const generation = saveGeneration;
@@ -145,16 +155,23 @@ function scheduleSave(options = {}) {
         const selected = [...Store.items, ...Store.arch].find((item) => item.id === Store.ui.sel);
         if (selected && !Store.ui.showForm) renderHistory(selected);
       }
+      return result;
     })
-    .catch((err) => console.error('queued save failed', err));
+    .catch((err) => {
+      console.error('queued save failed', err);
+      return { ok: false };
+    });
+  return saveQueue;
 }
 
 function commit(options = {}) {
-  scheduleSave(options);
+  const saved = scheduleSave(options);
   render();
+  return saved;
 }
 function clearRendererProfile() {
   detailDrafts.clear();
+  checkInNotice = null;
   Settings.close();
   Store.categoryOptions = null;
   Store.items = [];
@@ -185,24 +202,6 @@ const Actions = {
     Store.items = Store.items.map((i) => (i.id === id ? D.updateItem(i, v, Date.now()) : i));
     commit({ historyAction: 'edit' });
   },
-  review(id, nextDate) {
-    const now = Date.now();
-    Store.items = Store.items.map((i) => (i.id === id ? D.reviewItem(i, now, nextDate) : i));
-    commit({ historyAction: 'review' });
-  },
-  snooze(id, date) {
-    Store.items = Store.items.map((i) => (i.id === id ? D.snoozeItem(i, date, Date.now()) : i));
-    commit({ historyAction: 'snooze' });
-  },
-  archive(id) {
-    const it = Store.items.find((i) => i.id === id);
-    if (!it) return;
-    const now = Date.now();
-    Store.arch.unshift(D.archiveItem(it, now));
-    Store.items = Store.items.filter((i) => i.id !== id);
-    if (Store.ui.sel === id) Store.ui.sel = null;
-    commit({ historyAction: 'archive' });
-  },
   restore(id) {
     const it = Store.arch.find((i) => i.id === id);
     if (!it) return;
@@ -221,11 +220,6 @@ const Actions = {
         .attachmentsRemoveForItem(id)
         .catch((err) => console.error('attachment purge failed', err));
     commit({ historyAction: 'purge' });
-  },
-  addLogEntry(id, text) {
-    const now = Date.now();
-    Store.items = Store.items.map((i) => (i.id === id ? D.addLogEntry(i, text, now, uid) : i));
-    commit({ historyAction: 'log' });
   },
   restoreRevision(itemId, revision) {
     const current = [...Store.items, ...Store.arch].find((item) => item.id === itemId);
@@ -1080,7 +1074,10 @@ const Sync = {
       if (fromDisk) {
         const profileChanged =
           Object.hasOwn(fromDisk, 'profileId') && fromDisk.profileId !== Store.profileId;
-        if (profileChanged) detailDrafts.clear();
+        if (profileChanged) {
+          detailDrafts.clear();
+          checkInNotice = null;
+        }
         const merged = profileChanged
           ? {
               items: D.migrate(Array.isArray(fromDisk.items) ? fromDisk.items : []),
@@ -1116,6 +1113,146 @@ const Sync = {
     } catch (err) {
       console.error('reload after sync merge failed', err);
     }
+  },
+};
+
+// Save a check-in as one change, and only dismiss it after persistence succeeds.
+let checkInNotice = null;
+function renderCheckInNotice() {
+  const host = document.getElementById('check-in-notice');
+  host.hidden = !checkInNotice;
+  host.replaceChildren();
+  if (!checkInNotice) return;
+  host.append(node('span', '', checkInNotice.message));
+  if (checkInNotice.undo) host.append(button('Undo', checkInNotice.undo));
+}
+function replaceProject(item) {
+  const replace = (items, belongs) => {
+    const present = items.some((existing) => existing.id === item.id);
+    if (!belongs) return items.filter((existing) => existing.id !== item.id);
+    return present
+      ? items.map((existing) => (existing.id === item.id ? item : existing))
+      : [item, ...items];
+  };
+  Store.items = replace(Store.items, !item.archivedAt);
+  Store.arch = replace(Store.arch, !!item.archivedAt);
+}
+const CheckIn = {
+  async save(id, transform, action, options = {}) {
+    const draft = detailDraft(id);
+    const before = [...Store.items, ...Store.arch].find((item) => item.id === id);
+    if (!before || draft.pending) return;
+    const generation = saveGeneration;
+    const view = Store.ui.view;
+    const note = draft.note;
+    const after = transform(before);
+    draft.pending = true;
+    checkInNotice = null;
+    replaceProject(after);
+    const result = await commit({ historyAction: action });
+    if (generation !== saveGeneration || detailDrafts.get(id) !== draft) return;
+    draft.pending = false;
+    if (!result?.ok) {
+      // Do not overwrite a newer change that arrived while this save was pending.
+      if ([...Store.items, ...Store.arch].find((item) => item.id === id) === after)
+        replaceProject(before);
+      checkInNotice = {
+        message: 'Could not save the change. Your draft is still here; please try again.',
+      };
+      render();
+      if (Store.ui.sel === id && Store.ui.view === view)
+        document.getElementById('check-in-notice').focus();
+      return;
+    }
+    if (options.clearNote && draft.note === note) draft.note = '';
+    if (options.resetReview) {
+      draft.reviewChoice = 'rhythm';
+      draft.reviewDate = '';
+    }
+    const current = [...Store.items, ...Store.arch].find((item) => item.id === id) || after;
+    const reasons = D.attentionReasons(current);
+    const remaining =
+      options.finish && reasons.length ? ' Still needs attention: ' + reasons.join('; ') + '.' : '';
+    checkInNotice = { message: current.name + ': ' + options.message(current) + remaining };
+    if (options.undo) checkInNotice.undo = () => options.undo(current);
+    const isCurrent = Store.ui.sel === id && Store.ui.view === view;
+    render();
+    if (
+      isCurrent &&
+      (current.archivedAt || (options.finish && view === 'today' && !reasons.length))
+    ) {
+      closeDetail();
+      document.getElementById('check-in-notice').focus();
+    } else if (isCurrent && options.finish) {
+      document.getElementById('check-in-notice').focus();
+    } else if (isCurrent && options.clearNote && !options.finish) {
+      document.getElementById('detail-update')?.focus({ preventScroll: true });
+    }
+  },
+  review(id, nextDate) {
+    return this.save(
+      id,
+      (item) => D.completeReview(item, detailDraft(id).note, Date.now(), nextDate, uid),
+      'review',
+      {
+        clearNote: true,
+        resetReview: true,
+        finish: true,
+        message: (item) =>
+          item.nextReviewOn
+            ? 'Reviewed · next review ' + dateLabel(item.nextReviewOn) + '.'
+            : 'Reviewed · no next review scheduled.',
+      }
+    );
+  },
+  update(id) {
+    const text = detailDraft(id).note.trim();
+    if (!text) return;
+    return this.save(id, (item) => D.addLogEntry(item, text, Date.now(), uid), 'log', {
+      clearNote: true,
+      message: () => 'Update saved. Review date unchanged.',
+    });
+  },
+  snooze(id, date) {
+    return this.save(id, (item) => D.snoozeItem(item, date, Date.now()), 'snooze', {
+      finish: true,
+      message: () => 'Review snoozed until ' + dateLabel(date) + '. Not marked reviewed.',
+    });
+  },
+  checkpoint(id) {
+    return this.save(
+      id,
+      (item) => D.updateItem(item, { checkpoint: '', checkpointOn: '' }, Date.now()),
+      'edit',
+      {
+        finish: true,
+        message: () => 'Checkpoint completed.',
+      }
+    );
+  },
+  archive(id) {
+    return this.save(id, (item) => D.archiveItem(item, Date.now()), 'archive', {
+      message: () => 'Archived.',
+      undo: (archived) => {
+        const current = Store.arch.find((item) => item.id === id);
+        if (!current || current.updatedAt !== archived.updatedAt) {
+          checkInNotice = {
+            message:
+              'This project has changed since it was archived. Open All → Archive to restore it.',
+          };
+          renderCheckInNotice();
+          return;
+        }
+        return this.save(
+          id,
+          (item) => D.updateItem(item, { archivedAt: undefined }, Date.now()),
+          'restore',
+          {
+            message: () => 'Archive undone. Review date unchanged.',
+          }
+        );
+      },
+    });
   },
 };
 
@@ -1265,6 +1402,67 @@ function renderRadar() {
     legend.append(row);
   });
 }
+function renderSnooze(item, draft) {
+  const disclosure = node('details', 'snooze-options');
+  disclosure.open = draft.snoozeOpen;
+  disclosure.append(node('summary', '', 'Snooze review…'));
+  disclosure.addEventListener('toggle', () => {
+    if (disclosure.isConnected) draft.snoozeOpen = disclosure.open;
+  });
+  const label = node('label', '', 'Remind me');
+  label.htmlFor = 'snooze-choice';
+  const select = node('select');
+  select.id = 'snooze-choice';
+  for (const [value, text] of [
+    ['1', 'Tomorrow'],
+    ['3', 'In 3 days'],
+    ['7', 'In a week'],
+    ['custom', 'Choose a date…'],
+  ]) {
+    const option = node('option', '', text);
+    option.value = value;
+    select.append(option);
+  }
+  select.value = draft.snoozeChoice;
+  const date = node('input');
+  date.id = 'snooze-custom-date';
+  date.type = 'date';
+  date.min = dateAfter(1);
+  date.value = draft.snoozeDate;
+  date.hidden = select.value !== 'custom';
+  date.required = !date.hidden;
+  date.setAttribute('aria-label', 'Snooze review until');
+  date.addEventListener('input', () => {
+    draft.snoozeDate = date.value;
+  });
+  select.addEventListener('change', () => {
+    draft.snoozeChoice = select.value;
+    date.hidden = select.value !== 'custom';
+    date.required = !date.hidden;
+    if (!date.hidden) date.focus();
+  });
+  const snooze = button('Snooze review', () => {
+    if (select.value === 'custom' && !date.reportValidity()) return;
+    CheckIn.snooze(
+      item.id,
+      select.value === 'custom' ? date.value : dateAfter(Number(select.value))
+    );
+  });
+  snooze.id = 'review-snooze';
+  const controls = node('div', 'review-controls');
+  controls.append(select, date, snooze);
+  disclosure.append(
+    label,
+    controls,
+    node(
+      'p',
+      'field-help',
+      'Moves only the review date. Your update draft is kept; due checkpoints stay open.'
+    )
+  );
+  return disclosure;
+}
+
 function renderDetail() {
   const panel = document.getElementById('detail-panel');
   const active = document.activeElement;
@@ -1365,13 +1563,7 @@ function renderDetailContent() {
     if (it.checkpointOn)
       checkpoint.append(node('span', 'checkpoint-date', dateLabel(it.checkpointOn)));
     if (!it.archivedAt)
-      checkpoint.append(
-        button(
-          'Complete checkpoint',
-          () => Actions.update(it.id, { checkpoint: '', checkpointOn: '' }),
-          'quiet'
-        )
-      );
+      checkpoint.append(button('Complete checkpoint', () => CheckIn.checkpoint(it.id), 'quiet'));
     context.append(checkpoint);
   }
   const notes = document.getElementById('detail-notes');
@@ -1424,30 +1616,24 @@ function renderDetailContent() {
           ? undefined
           : dateAfter(Number(select.value));
     const validChoice = () => select.value !== 'custom' || date.reportValidity();
-    const snooze = button('Snooze review', () => {
-      if (validChoice()) Actions.snooze(it.id, chosenDate());
-    });
-    snooze.id = 'review-snooze';
-    snooze.disabled = select.value === 'rhythm';
     select.addEventListener('change', () => {
       draft.reviewChoice = select.value;
       date.hidden = select.value !== 'custom';
       date.required = !date.hidden;
-      snooze.disabled = select.value === 'rhythm';
       if (!date.hidden) date.focus();
     });
     const controls = node('div', 'review-controls');
     controls.append(select, date);
     const reviewActions = node('div', 'review-actions');
     const reviewed = button(
-      'Reviewed',
+      draft.pending ? 'Saving…' : 'Complete review',
       () => {
-        if (validChoice()) Actions.review(it.id, chosenDate());
+        if (validChoice()) CheckIn.review(it.id, chosenDate());
       },
       'primary'
     );
     reviewed.id = 'review-submit';
-    reviewActions.append(reviewed, snooze);
+    reviewActions.append(reviewed);
     schedule.append(
       label,
       controls,
@@ -1455,11 +1641,17 @@ function renderDetailContent() {
       node(
         'p',
         'field-help',
-        'Reviewing resets this rhythm. Checkpoints stay open until completed.'
+        'Complete review saves your update and schedules the next review. Checkpoints are completed separately.'
       )
     );
-    if (Store.ui.view === 'all') actions.append(button('Edit project', () => openEdit(it)));
-    actions.append(button('Archive', () => Actions.archive(it.id), 'quiet'));
+    schedule.append(renderSnooze(it, draft));
+    actions.append(button('Edit project', () => openEdit(it)));
+    const more = node('details', 'secondary-actions');
+    more.append(
+      node('summary', '', 'More actions'),
+      button('Archive', () => CheckIn.archive(it.id), 'quiet')
+    );
+    actions.append(more);
   } else {
     actions.append(
       button('Restore', () => Actions.restore(it.id)),
@@ -1499,25 +1691,28 @@ function renderDetailContent() {
     input.value = draft.note;
     input.addEventListener('input', () => {
       draft.note = input.value;
+      document.getElementById('detail-update-submit').disabled =
+        draft.pending || !draft.note.trim();
     });
     input.placeholder = 'Add a status update…';
     input.setAttribute('aria-label', 'Status update');
-    const submit = () => {
-      if (!input.value.trim()) return;
-      const text = input.value.trim();
-      draft.note = '';
-      Actions.addLogEntry(it.id, text);
-      document.getElementById('detail-update').focus({ preventScroll: true });
-    };
+    const submit = () => CheckIn.update(it.id);
     input.addEventListener('keydown', (e) => {
       if (e.key === 'Enter') {
         e.preventDefault();
         submit();
       }
     });
-    const addUpdate = button('Add update', submit);
+    const addUpdate = button('Save update only', submit);
+    addUpdate.disabled = draft.pending || !draft.note.trim();
     addUpdate.id = 'detail-update-submit';
-    compose.append(input, addUpdate);
+    compose.append(node('label', 'eyebrow', 'Update (optional)'), input, addUpdate);
+    compose.firstChild.htmlFor = input.id;
+  }
+  if (draft.pending) {
+    panel.querySelectorAll('button:not(#detail-close), select, input').forEach((control) => {
+      control.disabled = true;
+    });
   }
 }
 function renderHistory(item) {
@@ -1527,7 +1722,7 @@ function renderHistory(item) {
   const revisions = Store.itemRevisions
     .filter((revision) => revision.itemId === item.id)
     .sort((a, b) => (b.clientTime || 0) - (a.clientTime || 0));
-  host.append(node('h3', 'eyebrow', 'History · ' + revisions.length + ' saved versions'));
+  host.append(node('summary', 'eyebrow', 'History · ' + revisions.length + ' saved versions'));
   if (!revisions.length) {
     host.append(node('p', 'field-help', 'History starts with the next saved change.'));
     return;
@@ -1586,8 +1781,9 @@ function renderHistory(item) {
       },
       'quiet'
     );
-    restore.disabled = Boolean(revision.snapshot?.deletedAt);
-    if (restore.disabled) restore.title = 'Deleted snapshots cannot be restored directly';
+    restore.disabled = Boolean(revision.snapshot?.deletedAt) || detailDraft(item.id).pending;
+    if (revision.snapshot?.deletedAt)
+      restore.title = 'Deleted snapshots cannot be restored directly';
     row.append(restore);
     host.append(row);
   });
@@ -1611,6 +1807,7 @@ async function renderAttachments(item) {
     },
     'quiet'
   );
+  add.disabled = !HAS_API || !window.radarAPI.attachmentsPickAdd || detailDraft(item.id).pending;
   host.append(add);
   if (!HAS_API || !window.radarAPI.attachmentsList) {
     host.append(node('p', 'field-help', 'Attachments are available in the desktop app.'));
@@ -1734,6 +1931,7 @@ function renderList() {
   });
 }
 function render() {
+  renderCheckInNotice();
   const today = Store.ui.view === 'today';
   const radar = Store.ui.view === 'radar';
   const archive = Store.ui.view === 'archive';
@@ -1778,7 +1976,7 @@ function render() {
     ? 'Ctrl/Cmd+Enter save · Esc cancel'
     : 'N new · / search · ' +
       (Store.ui.view === 'all' ? 'E edit · ' : '') +
-      'R reviewed · Esc close';
+      'R complete review · Esc close';
   document.getElementById('form-panel').hidden = !Store.ui.showForm;
   document.getElementById('list').hidden = radar;
   document.getElementById('radar-view').hidden = !radar;
@@ -2069,10 +2267,16 @@ function wire() {
     } else if (e.key === '/') {
       e.preventDefault();
       focusSearch();
-    } else if ((e.key === 'e' || e.key === 'E') && sel && !sel.archivedAt) openEdit(sel);
+    } else if (
+      (e.key === 'e' || e.key === 'E') &&
+      sel &&
+      !sel.archivedAt &&
+      !detailDraft(sel.id).pending
+    )
+      openEdit(sel);
     else if (['r', 'R', 'p', 'P'].includes(e.key) && sel && !sel.archivedAt)
       document.getElementById('review-submit')?.click();
-    else if ((e.key === 'a' || e.key === 'A') && sel && !sel.archivedAt) Actions.archive(sel.id);
+    else if ((e.key === 'a' || e.key === 'A') && sel && !sel.archivedAt) CheckIn.archive(sel.id);
   });
 
   if (HAS_API && window.radarAPI.onMenu) {
