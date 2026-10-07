@@ -1,13 +1,13 @@
-Work Radar v0.2 restores the spatial radar as a focused, interactive project view.
+Work Radar v0.2.1 makes daily reviews clearer and keeps the radar usable on smaller screens.
 
 ## Highlights
 
-- Open the new **Radar** tab alongside Today and All to see every live project at a glance.
-- Higher-priority projects with nearer review dates sit closer to the center; lower-priority or later reviews sit farther out.
-- Dots are coloured by category, with a responsive legend and a distinct fallback for uncategorized projects.
-- Hover or focus a dot to reveal its project name, then select it to open the existing detail and review controls.
-- Radar positions update as review dates change and remain accessible by keyboard.
-- Internal renderer, sync, and test code received a broad cleanup without changing the data format.
+- **Complete review** saves an optional status update and the chosen next-review date together. Today returns to the list when nothing remains due, or explains which checkpoint still needs attention.
+- **Save update only** records a note without changing the review date. **Snooze review…** has its own date picker and keeps any unfinished update.
+- Draft updates and review choices survive closing and reopening project details during the current app session. Saving no longer resets the review controls, and keyboard review uses the selected date.
+- Failed check-in saves retain the draft for retry. Repeated submissions are blocked while saving.
+- Archive offers **Undo** without changing the original review schedule. Edit project is available in Today, and saved-version history is collapsed by default.
+- The radar fits the available width and height. Selecting a radar project opens full-workspace details; **✕** or **Escape** returns to the radar.
 
 ## Downloads
 
@@ -21,4 +21,4 @@ Open the app and sign in with your invited email address. Open the magic link on
 
 The Windows portable download stores data in your OS account's app-data folder. Copying the executable does not copy your data or login. Windows downloads are unsigned and may show an operating-system warning.
 
-Automatic updates are not included. Install v0.2 manually to upgrade; your existing app-data folder is retained. SHA-256 checksums are included in `SHA256SUMS.txt`.
+Automatic updates are not included. Install v0.2.1 manually to upgrade; your existing app-data folder is retained. SHA-256 checksums are included in `SHA256SUMS.txt`.
