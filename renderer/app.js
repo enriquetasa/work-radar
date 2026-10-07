@@ -99,6 +99,14 @@ const Store = {
   },
 };
 
+// Keep unfinished check-ins when controls refresh or a project is closed.
+const detailDrafts = new Map();
+function detailDraft(id) {
+  if (!detailDrafts.has(id))
+    detailDrafts.set(id, { note: '', reviewChoice: 'rhythm', reviewDate: '' });
+  return detailDrafts.get(id);
+}
+
 // Save queue
 let saveQueue = Promise.resolve();
 let saveGeneration = 0;
@@ -134,7 +142,8 @@ function scheduleSave(options = {}) {
       if (generation !== saveGeneration) return;
       if (result && result.data) {
         mergeSavedMetadata(result.data);
-        render();
+        const selected = [...Store.items, ...Store.arch].find((item) => item.id === Store.ui.sel);
+        if (selected && !Store.ui.showForm) renderHistory(selected);
       }
     })
     .catch((err) => console.error('queued save failed', err));
@@ -145,6 +154,7 @@ function commit(options = {}) {
   render();
 }
 function clearRendererProfile() {
+  detailDrafts.clear();
   Settings.close();
   Store.categoryOptions = null;
   Store.items = [];
@@ -1070,6 +1080,7 @@ const Sync = {
       if (fromDisk) {
         const profileChanged =
           Object.hasOwn(fromDisk, 'profileId') && fromDisk.profileId !== Store.profileId;
+        if (profileChanged) detailDrafts.clear();
         const merged = profileChanged
           ? {
               items: D.migrate(Array.isArray(fromDisk.items) ? fromDisk.items : []),
@@ -1190,12 +1201,10 @@ function closeDetail() {
   const selectedId = Store.ui.sel;
   Store.ui.sel = null;
   render();
-  if (Store.ui.view === 'radar') {
-    const blip = [...document.querySelectorAll('.radar-blip')].find(
-      (element) => element.dataset.itemId === selectedId
-    );
-    (blip || document.querySelector('.tab[data-view="radar"]')).focus();
-  }
+  const target = [...document.querySelectorAll('[data-item-id]')].find(
+    (element) => element.dataset.itemId === selectedId && element.getClientRects().length
+  );
+  (target || document.querySelector('.tab.active')).focus();
 }
 
 function renderRadar() {
@@ -1258,6 +1267,22 @@ function renderRadar() {
 }
 function renderDetail() {
   const panel = document.getElementById('detail-panel');
+  const active = document.activeElement;
+  const focusId = panel.contains(active) ? active.id : '';
+  const selection =
+    active.selectionStart == null ? null : [active.selectionStart, active.selectionEnd];
+  const inspector = document.getElementById('inspector');
+  const scrollTop = inspector.scrollTop;
+  renderDetailContent();
+  const target = focusId && document.getElementById(focusId);
+  if (!panel.hidden && target) {
+    target.focus({ preventScroll: true });
+    if (selection && target.setSelectionRange) target.setSelectionRange(...selection);
+  }
+  inspector.scrollTop = scrollTop;
+}
+function renderDetailContent() {
+  const panel = document.getElementById('detail-panel');
   const it = (
     Store.ui.view === 'recovery'
       ? recoveryItems()
@@ -1269,6 +1294,7 @@ function renderDetail() {
     .classList.toggle('viewing-radar-project', Store.ui.view === 'radar' && !panel.hidden);
   document.getElementById('inspector').hidden = !it && !Store.ui.showForm;
   if (panel.hidden) return;
+  const draft = detailDraft(it.id);
   if (Store.ui.view === 'recovery') {
     document.getElementById('detail-name').textContent = it.name;
     document
@@ -1381,7 +1407,14 @@ function renderDetail() {
     }
     const date = node('input');
     date.type = 'date';
-    date.hidden = true;
+    date.id = 'review-custom-date';
+    select.value = draft.reviewChoice;
+    date.value = draft.reviewDate;
+    date.hidden = select.value !== 'custom';
+    date.required = !date.hidden;
+    date.addEventListener('input', () => {
+      draft.reviewDate = date.value;
+    });
     date.min = D.localDate();
     date.setAttribute('aria-label', 'Custom next review date');
     const chosenDate = () =>
@@ -1394,8 +1427,10 @@ function renderDetail() {
     const snooze = button('Snooze review', () => {
       if (validChoice()) Actions.snooze(it.id, chosenDate());
     });
-    snooze.disabled = true;
+    snooze.id = 'review-snooze';
+    snooze.disabled = select.value === 'rhythm';
     select.addEventListener('change', () => {
+      draft.reviewChoice = select.value;
       date.hidden = select.value !== 'custom';
       date.required = !date.hidden;
       snooze.disabled = select.value === 'rhythm';
@@ -1404,16 +1439,15 @@ function renderDetail() {
     const controls = node('div', 'review-controls');
     controls.append(select, date);
     const reviewActions = node('div', 'review-actions');
-    reviewActions.append(
-      button(
-        'Reviewed',
-        () => {
-          if (validChoice()) Actions.review(it.id, chosenDate());
-        },
-        'primary'
-      ),
-      snooze
+    const reviewed = button(
+      'Reviewed',
+      () => {
+        if (validChoice()) Actions.review(it.id, chosenDate());
+      },
+      'primary'
     );
+    reviewed.id = 'review-submit';
+    reviewActions.append(reviewed, snooze);
     schedule.append(
       label,
       controls,
@@ -1461,10 +1495,19 @@ function renderDetail() {
   compose.replaceChildren();
   if (!it.archivedAt) {
     const input = node('input', 'detail-log-input');
+    input.id = 'detail-update';
+    input.value = draft.note;
+    input.addEventListener('input', () => {
+      draft.note = input.value;
+    });
     input.placeholder = 'Add a status update…';
     input.setAttribute('aria-label', 'Status update');
     const submit = () => {
-      if (input.value.trim()) Actions.addLogEntry(it.id, input.value.trim());
+      if (!input.value.trim()) return;
+      const text = input.value.trim();
+      draft.note = '';
+      Actions.addLogEntry(it.id, text);
+      document.getElementById('detail-update').focus({ preventScroll: true });
     };
     input.addEventListener('keydown', (e) => {
       if (e.key === 'Enter') {
@@ -1472,7 +1515,9 @@ function renderDetail() {
         submit();
       }
     });
-    compose.append(input, button('Add update', submit));
+    const addUpdate = button('Add update', submit);
+    addUpdate.id = 'detail-update-submit';
+    compose.append(input, addUpdate);
   }
 }
 function renderHistory(item) {
@@ -1647,6 +1692,7 @@ function renderList() {
     const row = node('button', 'contact-row' + (Store.ui.sel === item.id ? ' selected' : ''));
     row.type = 'button';
     if (Store.ui.sel === item.id) row.style.borderLeftColor = PC[item.priority];
+    row.dataset.itemId = item.id;
     row.setAttribute('aria-expanded', String(Store.ui.sel === item.id));
     row.setAttribute('aria-controls', 'detail-panel');
     row.addEventListener('click', () => selectProject(item));
@@ -2024,7 +2070,8 @@ function wire() {
       e.preventDefault();
       focusSearch();
     } else if ((e.key === 'e' || e.key === 'E') && sel && !sel.archivedAt) openEdit(sel);
-    else if (['r', 'R', 'p', 'P'].includes(e.key) && sel && !sel.archivedAt) Actions.review(sel.id);
+    else if (['r', 'R', 'p', 'P'].includes(e.key) && sel && !sel.archivedAt)
+      document.getElementById('review-submit')?.click();
     else if ((e.key === 'a' || e.key === 'A') && sel && !sel.archivedAt) Actions.archive(sel.id);
   });
 
