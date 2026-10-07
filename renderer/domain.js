@@ -404,6 +404,12 @@ ${groupsHTML}
     };
   }
 
+  function completeReview(item, note, now = Date.now(), nextReviewOn, idFn = uid) {
+    const reviewed = reviewItem(item, now, nextReviewOn);
+    const text = typeof note === 'string' ? note.trim() : '';
+    return text ? addLogEntry(reviewed, text, now, idFn) : reviewed;
+  }
+
   function pingItem(item, now = Date.now()) {
     return reviewItem(item, now);
   }
@@ -544,6 +550,7 @@ ${groupsHTML}
     attentionReasons,
     isDueToday,
     reviewItem,
+    completeReview,
     snoozeItem,
     isStale,
     migrate,

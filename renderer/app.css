@@ -351,9 +351,54 @@ select {
 }
 #detail-log-compose {
   display: flex;
+  flex-wrap: wrap;
   gap: 6px;
   align-items: center;
   margin-top: 8px;
+}
+#detail-log-compose > label {
+  flex-basis: 100%;
+}
+#check-in-notice {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-shrink: 0;
+  padding: 10px 16px;
+  border-bottom: 1px solid #1a5c2c;
+  background: #062011;
+  color: #69f0ae;
+  font-size: 10px;
+  line-height: 1.5;
+}
+#check-in-notice > span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+#check-in-notice:focus-visible {
+  outline: 1px solid #69f0ae;
+  outline-offset: -2px;
+}
+.snooze-options {
+  margin-top: 10px;
+}
+.snooze-options summary,
+.secondary-actions summary,
+#detail-history summary {
+  cursor: pointer;
+  color: #69f0ae;
+  font-size: 9px;
+  padding: 5px 0;
+}
+.snooze-options label {
+  margin: 6px 0;
+}
+.secondary-actions .dact {
+  margin-top: 6px;
+}
+#detail-panel button:disabled {
+  cursor: default;
+  opacity: 0.5;
 }
 .detail-log-input {
   flex: 1;
