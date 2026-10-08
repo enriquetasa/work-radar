@@ -24,11 +24,7 @@ const { createOnboardingStore } = require('./onboarding-store');
 const { normalizePreferences, buildBriefing, renderBriefing } = require('./briefing');
 const history = require('./sync/history');
 const { createAttachmentService } = require('./sync/attachments');
-const {
-  createFullBackupArchive,
-  importFullBackupArchive,
-  parseFullBackupArchive,
-} = require('./sync/attachment-backup');
+const { importFullBackupArchive, parseFullBackupArchive } = require('./sync/attachment-backup');
 
 // Keep the data directory stable if the Electron product name changes.
 app.setPath('userData', path.join(app.getPath('appData'), 'work-radar'));
@@ -93,11 +89,6 @@ function assertProfileContext(context) {
   }
 }
 
-function assertPayloadProfile(data, context) {
-  if (data && Object.hasOwn(data, 'profileId') && (data.profileId || null) !== context.profileId) {
-    throw new Error('profile changed; reload before continuing');
-  }
-}
 const onboardingStore = createOnboardingStore({
   filePath: ONBOARDING_FILE(),
   read: readJSON,
@@ -224,42 +215,6 @@ ipcMain.handle('data:save', async (_e, data) => {
   }
 });
 
-ipcMain.handle('data:export', async (_e, data) => {
-  const context = captureProfileContext();
-  const { canceled, filePath } = await dialog.showSaveDialog(win, {
-    title: 'Export Work Radar backup',
-    defaultPath: `work-radar-backup-${new Date().toISOString().slice(0, 10)}.json`,
-    filters: [{ name: 'JSON', extensions: ['json'] }],
-  });
-  if (canceled || !filePath) return { ok: false };
-  try {
-    assertProfileContext(context);
-    assertPayloadProfile(data, context);
-    await localDataQueue;
-    assertProfileContext(context);
-    const authoritative = (await readJSON(context.dataPath)) || data;
-    assertProfileContext(context);
-    if (Number.isSafeInteger(authoritative?.schema) && authoritative.schema > 3)
-      throw new Error('Unsupported newer Work Radar data schema: ' + authoritative.schema);
-    const service = buildAttachmentService(supabaseClient);
-    const attachmentRecords = service
-      ? await service.list({ scope: context.scope, includeDeleted: false })
-      : [];
-    assertProfileContext(context);
-    const exported = {
-      ...authoritative,
-      attachments: attachmentRecords.map(({ localPath, cachePath, ...record }) => record),
-    };
-    await fsp.writeFile(filePath, JSON.stringify(exported, null, 2), 'utf8');
-    assertProfileContext(context);
-    log.info('exported backup', { path: filePath });
-    return { ok: true, path: filePath };
-  } catch (err) {
-    log.error('failed to export backup', { path: filePath, err });
-    return { ok: false, error: err.message };
-  }
-});
-
 ipcMain.handle('data:import', async () => {
   const context = captureProfileContext();
   const { canceled, filePaths } = await dialog.showOpenDialog(win, {
@@ -276,59 +231,6 @@ ipcMain.handle('data:import', async () => {
     return imported;
   } catch (err) {
     return { error: err.message };
-  }
-});
-
-ipcMain.handle('data:exportFull', async (_event, data) => {
-  const context = captureProfileContext();
-  const { canceled, filePath } = await dialog.showSaveDialog(win, {
-    title: 'Export full Work Radar backup',
-    defaultPath: `work-radar-full-backup-${new Date().toISOString().slice(0, 10)}.wrbackup`,
-    filters: [{ name: 'Work Radar backup', extensions: ['wrbackup'] }],
-  });
-  if (canceled || !filePath) return { ok: false };
-  try {
-    assertProfileContext(context);
-    assertPayloadProfile(data, context);
-    await localDataQueue;
-    assertProfileContext(context);
-    const authoritative = (await readJSON(context.dataPath)) || data;
-    assertProfileContext(context);
-    if (Number.isSafeInteger(authoritative?.schema) && authoritative.schema > 3)
-      throw new Error('Unsupported newer Work Radar data schema: ' + authoritative.schema);
-    const service = buildAttachmentService(supabaseClient);
-    const attachments = service
-      ? await service.list({ scope: context.scope, includeDeleted: false })
-      : [];
-    assertProfileContext(context);
-    const archive = await createFullBackupArchive({
-      data: authoritative,
-      history: authoritative.itemRevisions || [],
-      attachments,
-      readAttachmentBytes: async (record) => {
-        assertProfileContext(context);
-        if (!service) return null;
-        const local = await service
-          .storage(context.scope)
-          .read(record.id)
-          .catch(() => null);
-        if (local) {
-          assertProfileContext(context);
-          return local.bytes;
-        }
-        const downloaded = await service.download(record.id, { scope: context.scope });
-        const bytes = await fsp.readFile(downloaded);
-        assertProfileContext(context);
-        return bytes;
-      },
-    });
-    assertProfileContext(context);
-    await fsp.writeFile(filePath, archive);
-    assertProfileContext(context);
-    return { ok: true, path: filePath };
-  } catch (err) {
-    log.error('full backup export failed', { err });
-    return { ok: false, error: err.message };
   }
 });
 
@@ -467,10 +369,10 @@ ipcMain.handle('data:importFull', async () => {
   }
 });
 
-ipcMain.handle('data:exportPDF', async (_e, html) => {
+ipcMain.handle('data:exportPDF', async (_e, html, { titlesOnly = false } = {}) => {
   const { canceled, filePath } = await dialog.showSaveDialog(win, {
-    title: 'Export PDF Report',
-    defaultPath: `work-radar-report-${new Date().toISOString().slice(0, 10)}.pdf`,
+    title: titlesOnly ? 'Export PDF — Titles only' : 'Export PDF — Full details',
+    defaultPath: `work-radar-report-${titlesOnly ? 'titles-only-' : ''}${new Date().toISOString().slice(0, 10)}.pdf`,
     filters: [{ name: 'PDF', extensions: ['pdf'] }],
   });
   if (canceled || !filePath) return { ok: false };
@@ -1090,9 +992,16 @@ function buildMenu() {
         { label: 'New Project', accelerator: 'CmdOrCtrl+N', click: send('new') },
         { label: 'Search', accelerator: 'CmdOrCtrl+F', click: send('search') },
         { type: 'separator' },
-        { label: 'Export JSON Backup…', accelerator: 'CmdOrCtrl+E', click: send('export') },
-        { label: 'Export PDF Report…', accelerator: 'CmdOrCtrl+Shift+E', click: send('exportPDF') },
-        { label: 'Export Full Backup…', click: send('exportFull') },
+        {
+          label: 'Export PDF — Full details…',
+          accelerator: 'CmdOrCtrl+Shift+E',
+          click: send('exportPDF'),
+        },
+        {
+          label: 'Export PDF — Titles only…',
+          accelerator: 'CmdOrCtrl+E',
+          click: send('exportPDFTitles'),
+        },
         { label: 'Import Backup…', accelerator: 'CmdOrCtrl+I', click: send('import') },
         { label: 'Import Full Backup…', click: send('importFull') },
         { label: 'Reveal Auto-Backups', click: send('reveal') },

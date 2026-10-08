@@ -54,7 +54,7 @@ A single JSON file in the OS app-data directory:
 - **Windows:** `%APPDATA%\work-radar\work-radar-data.json`
 - **Linux:** `~/.config/work-radar/work-radar-data.json`
 
-Writes are atomic (temp file + rename), so a crash mid-save can't corrupt it. A dated snapshot is copied to `backups/` once per day on launch (last 30 kept). **Radar → Reveal Auto-Backups** opens that folder. **Radar → Export JSON Backup…** still writes a portable copy anywhere you choose — good for dropping into a synced folder.
+Writes are atomic (temp file + rename), so a crash mid-save can't corrupt it. A dated snapshot is copied to `backups/` once per day on launch (last 30 kept). **Radar → Reveal Auto-Backups** opens that folder. **Radar → Export PDF — Full details…** exports the full report; **Export PDF — Titles only…** exports project titles grouped by priority. PDF is the only export format.
 
 Unlike the old single-file HTML version, this does **not** depend on browser storage or the file's path. Move the app, rename it, doesn't matter — the data directory is stable.
 
@@ -264,7 +264,7 @@ Every project edit is retained as bounded recovery history (newest 100 versions 
 
 Morning briefings are opt-in. Signed-in users can open the account panel to choose an IANA timezone, local time, weekdays, preview the deterministic due-project list, and send a test email. Delivery requires the protected Supabase Edge Function and a configured provider; applying the local migration alone does not enable sending. The function derives the recipient from the verified account email and skips empty briefings. See [the implementation plan](docs/history-attachments-briefing-plan.md), [briefing operations](docs/morning-briefing-operations.md), and [distribution setup](docs/distribution.md) for deployment configuration and rollback guidance.
 
-JSON backups preserve history and attachment metadata. The desktop menu can export and import full Work Radar archives with project data, history, attachment metadata, and checksum-verified attachment bytes; unavailable attachment bytes are reported rather than silently omitted.
+Automatic JSON backups preserve history and attachment metadata. The desktop menu can still import existing JSON backups and full Work Radar archives with project data, history, attachment metadata, and checksum-verified attachment bytes.
 
 ## Migrating from the browser version
 
@@ -307,7 +307,7 @@ Archive offers Undo, which restores the project without changing its review date
 Waiting-on text without a date does not itself add a project to Today. Blank next-review dates use the rhythm; manual rhythm without a
 specific next date disables scheduled reviews.
 
-JSON export, import, PDF reporting, and automatic backup access live in the **Radar**
+PDF exports (full details or titles only), backup imports, and automatic backup access live in the **Radar**
 application menu. Daily local backups continue automatically alongside optional cloud sync.
 
 ### Sync upgrade
@@ -322,7 +322,7 @@ Upgrade your other clients to edit the new fields.
 
 ## Keyboard
 
-`Cmd/Ctrl+N` new · `Cmd/Ctrl+F` search All · `Cmd/Ctrl+E` export · `Cmd/Ctrl+I` import
+`Cmd/Ctrl+N` new · `Cmd/Ctrl+F` search All · `Cmd/Ctrl+E` titles-only PDF · `Cmd/Ctrl+Shift+E` full PDF · `Cmd/Ctrl+I` import
 In-window: `N` new · `/` search All · `E` edit · `R` (or `P`) complete review · `A` archive · `Esc` close
 
 ## Development

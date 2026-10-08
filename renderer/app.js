@@ -21,7 +21,7 @@ const Persist = {
       const res = await window.radarAPI.save(obj);
       if (!res || !res.ok) {
         console.error('radar save failed', res && res.error);
-        alert('SAVE FAILED — export a backup now.');
+        alert('SAVE FAILED — your latest changes could not be saved.');
       }
       return res;
     }
@@ -30,7 +30,7 @@ const Persist = {
       return { ok: true };
     } catch (e) {
       console.error('localStorage write failed', e);
-      alert('STORAGE WRITE FAILED — export a backup now.');
+      alert('STORAGE WRITE FAILED — your latest changes could not be saved.');
       return { ok: false };
     }
   },
@@ -242,35 +242,6 @@ const Actions = {
     return true;
   },
 
-  async exportJSON() {
-    await saveQueue;
-    const data = Store.serialize();
-    if (HAS_API) {
-      const res = await window.radarAPI.export(data);
-      if (res && res.ok) {
-        Store.lastExport = Date.now();
-        commit();
-      }
-    } else {
-      const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
-      const a = document.createElement('a');
-      a.href = URL.createObjectURL(blob);
-      a.download = 'work-radar-backup-' + fdt(Date.now()) + '.json';
-      a.click();
-      URL.revokeObjectURL(a.href);
-      Store.lastExport = Date.now();
-      commit();
-    }
-  },
-
-  async exportFull() {
-    if (!HAS_API || !window.radarAPI.exportFull) return this.exportJSON();
-    await saveQueue;
-    const result = await window.radarAPI.exportFull(Store.serialize());
-    if (!result || !result.ok)
-      alert('FULL BACKUP FAILED — ' + ((result && result.error) || 'cancelled'));
-  },
-
   async importFull() {
     if (!HAS_API || !window.radarAPI.importFull) return;
     const data = await window.radarAPI.importFull();
@@ -282,10 +253,10 @@ const Actions = {
     return this.mergeImported(data, { skipConfirm: data.__fullImportConfirmed === true });
   },
 
-  async exportPDF() {
-    const html = D.buildReportHTML(Store.items);
+  async exportPDF(titlesOnly = false) {
+    const html = D.buildReportHTML(Store.items, Date.now(), { titlesOnly });
     if (HAS_API) {
-      const res = await window.radarAPI.exportPDF(html);
+      const res = await window.radarAPI.exportPDF(html, { titlesOnly });
       if (!res || !res.ok) {
         console.error('PDF export failed', res && res.error);
         if (res && res.error) alert('PDF EXPORT FAILED — ' + res.error);
@@ -2183,9 +2154,10 @@ function wire() {
     e.preventDefault();
     saveForm();
   });
-  document.getElementById('export-json-btn').addEventListener('click', () => Actions.exportJSON());
   document.getElementById('export-pdf-btn').addEventListener('click', () => Actions.exportPDF());
-  document.getElementById('export-full-btn').addEventListener('click', () => Actions.exportFull());
+  document
+    .getElementById('export-pdf-titles-btn')
+    .addEventListener('click', () => Actions.exportPDF(true));
   document.getElementById('import-full-btn').addEventListener('click', () => Actions.importFull());
   document.getElementById('import-btn').addEventListener('click', () => Actions.importJSON());
   if (HAS_API && window.radarAPI.attachmentsProcessQueue) {
@@ -2284,9 +2256,8 @@ function wire() {
       if (document.getElementById('settings-dialog').open) return;
       if (action === 'new') openAdd();
       else if (action === 'search') focusSearch();
-      else if (action === 'export') Actions.exportJSON();
       else if (action === 'exportPDF') Actions.exportPDF();
-      else if (action === 'exportFull') Actions.exportFull();
+      else if (action === 'exportPDFTitles') Actions.exportPDF(true);
       else if (action === 'import') Actions.importJSON();
       else if (action === 'importFull') Actions.importFull();
       else if (action === 'reveal' && window.radarAPI.revealBackups)

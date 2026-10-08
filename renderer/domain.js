@@ -237,7 +237,7 @@
       .replace(/"/g, '&quot;');
   }
 
-  function buildReportHTML(items, now = Date.now()) {
+  function buildReportHTML(items, now = Date.now(), { titlesOnly = false } = {}) {
     const date = fdt(now);
     const live = items
       .filter((i) => !i.archivedAt && !i.deletedAt)
@@ -255,6 +255,8 @@
       .map((g) => {
         const itemsHTML = g.items
           .map((item) => {
+            if (titlesOnly)
+              return `<div class="item"><div class="item-name">${escapeHtml(item.name.toUpperCase())}</div></div>`;
             const meta = [STATUS_LABEL[item.status], item.category].filter(Boolean).join('  /  ');
             const notesHTML = item.notes
               ? `<div class="item-notes">${escapeHtml(item.notes)}</div>`
