@@ -5,9 +5,7 @@ const { contextBridge, ipcRenderer } = require('electron');
 contextBridge.exposeInMainWorld('radarAPI', {
   load: () => ipcRenderer.invoke('data:load'),
   save: (data) => ipcRenderer.invoke('data:save', data),
-  export: (data) => ipcRenderer.invoke('data:export', data),
-  exportPDF: (html) => ipcRenderer.invoke('data:exportPDF', html),
-  exportFull: (data) => ipcRenderer.invoke('data:exportFull', data),
+  exportPDF: (html, options) => ipcRenderer.invoke('data:exportPDF', html, options),
   import: () => ipcRenderer.invoke('data:import'),
   importFull: () => ipcRenderer.invoke('data:importFull'),
   revealBackups: () => ipcRenderer.invoke('data:revealBackups'),

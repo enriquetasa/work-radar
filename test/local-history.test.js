@@ -12,7 +12,7 @@ function localSaveHandler(initialData) {
   let save;
   const source = fs.readFileSync(path.join(__dirname, '..', 'main.js'), 'utf8');
   const start = source.indexOf("ipcMain.handle('data:save',");
-  const end = source.indexOf("ipcMain.handle('data:export',", start);
+  const end = source.indexOf("ipcMain.handle('data:import',", start);
   vm.runInNewContext(source.slice(start, end), {
     ipcMain: { handle: (_channel, handler) => (save = handler) },
     history,

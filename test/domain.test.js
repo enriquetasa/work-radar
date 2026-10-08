@@ -999,6 +999,67 @@ test('buildReportHTML escapes HTML special characters', () => {
   assert.ok(html.includes('A &amp; B &lt;TEST&gt;'), 'special chars escaped and uppercased');
 });
 
+test('titles-only PDF keeps escaped titles and priority groups without project details', () => {
+  const items = D.migrate(
+    [
+      { name: 'Zed', priority: 'low' },
+      { name: 'Beta', priority: 'critical' },
+      {
+        name: 'A & B <test>',
+        priority: 'critical',
+        status: 'watch',
+        category: 'Private category',
+        notes: 'Private notes',
+        waitingOn: 'Private colleague',
+        checkpoint: 'Private checkpoint',
+        checkpointOn: '2026-10-20',
+        nextReviewOn: '2026-10-21',
+        reviewIntervalDays: 7,
+        log: [{ ts: NOW, text: 'Private activity' }],
+      },
+      { name: 'Archived project', archivedAt: NOW },
+      { name: 'Deleted project', deletedAt: NOW },
+    ],
+    NOW
+  );
+  const html = D.buildReportHTML(items, NOW, { titlesOnly: true });
+  assert.ok(html.includes('A &amp; B &lt;TEST&gt;'));
+  assert.ok(html.indexOf('A &amp; B &lt;TEST&gt;') < html.indexOf('BETA'));
+  assert.ok(html.indexOf('BETA') < html.indexOf('ZED'));
+  assert.ok(html.includes('class="group-label">CRITICAL'));
+  assert.ok(html.includes('class="group-label">LOW'));
+  assert.ok(html.includes('3 active contacts'));
+  for (const omitted of [
+    'Private',
+    'WATCH',
+    'Next review:',
+    'Review rhythm:',
+    'Waiting on:',
+    'Checkpoint:',
+    '2026-10-20',
+    '2026-10-21',
+    'ARCHIVED PROJECT',
+    'DELETED PROJECT',
+    'class="item-meta"',
+    'class="item-notes"',
+    'class="log"',
+  ]) {
+    assert.ok(!html.includes(omitted), `titles-only report omits ${omitted}`);
+  }
+  const full = D.buildReportHTML(items, NOW);
+  for (const detail of ['Private category', 'Private notes', 'Private activity', 'Next review:']) {
+    assert.ok(full.includes(detail), `full report retains ${detail}`);
+  }
+});
+
+test('both PDF variants handle an empty radar', () => {
+  for (const titlesOnly of [false, true]) {
+    const html = D.buildReportHTML([], NOW, { titlesOnly });
+    assert.ok(html.includes('0 active contacts'));
+    assert.ok(!html.includes('class="item"'));
+  }
+});
+
 test('mergeDiskIntoStore: an in-flight renderer edit survives a reload', () => {
   // A save queued before this reload (still in flight, or still sitting
   // in the debounce window) hasn't reached disk yet — the reload must
